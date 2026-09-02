@@ -1,0 +1,112 @@
+@page "/services"
+@attribute [Authorize]
+@inject IServiceControlClient ServiceControl
+
+<h1>Services</h1>
+
+@if (_statuses is null)
+{
+    <p>Loading...</p>
+}
+else
+{
+    <table class="status-table">
+        <thead>
+            <tr>
+                <th>Service</th>
+                <th>State</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var svc in ManagedServiceCatalog.All)
+            {
+                var status = _statuses.GetValueOrDefault(svc.Id);
+                <tr>
+                    <td>
+                        <strong>@svc.DisplayName</strong>
+                        <div class="muted">@svc.Description</div>
+                    </td>
+                    <td>
+                        <span class="badge badge-@StateCss(status?.State)">
+                            @(status?.State.ToString() ?? "Unknown")
+                        </span>
+                    </td>
+                    <td>
+                        <AuthorizeView Policy="AdminOnly" Context="authCtx">
+                            <Authorized>
+                                <button class="btn" disabled="@IsBusy(svc.Id)" @onclick="() => StartAsync(svc)">Start</button>
+                                <button class="btn" disabled="@IsBusy(svc.Id)" @onclick="() => StopAsync(svc)">Stop</button>
+                                <button class="btn" disabled="@IsBusy(svc.Id)" @onclick="() => RestartAsync(svc)">Restart</button>
+                            </Authorized>
+                        </AuthorizeView>
+                    </td>
+                </tr>
+                @if (_lastResult.TryGetValue(svc.Id, out var msg) && !string.IsNullOrWhiteSpace(msg))
+                {
+                    <tr>
+                        <td colspan="3"><pre class="output-box">@msg</pre></td>
+                    </tr>
+                }
+            }
+        </tbody>
+    </table>
+
+    <button class="btn" @onclick="RefreshAllAsync">Refresh</button>
+}
+
+@code {
+    private Dictionary<string, ServiceStatus>? _statuses;
+    private readonly HashSet<string> _busy = new();
+    private readonly Dictionary<string, string> _lastResult = new();
+
+    protected override Task OnInitializedAsync() => RefreshAllAsync();
+
+    private async Task RefreshAllAsync()
+    {
+        var results = new Dictionary<string, ServiceStatus>();
+        foreach (var svc in ManagedServiceCatalog.All)
+        {
+            results[svc.Id] = await ServiceControl.GetStatusAsync(svc);
+        }
+        _statuses = results;
+        StateHasChanged();
+    }
+
+    private bool IsBusy(string id) => _busy.Contains(id);
+
+    private async Task StartAsync(ManagedService svc) => await RunActionAsync(svc, ServiceControl.StartAsync);
+    private async Task StopAsync(ManagedService svc) => await RunActionAsync(svc, ServiceControl.StopAsync);
+    private async Task RestartAsync(ManagedService svc) => await RunActionAsync(svc, ServiceControl.RestartAsync);
+
+    private async Task RunActionAsync(ManagedService svc, Func<ManagedService, CancellationToken, Task<ServiceActionResult>> action)
+    {
+        _busy.Add(svc.Id);
+        StateHasChanged();
+
+        try
+        {
+            var result = await action(svc, CancellationToken.None);
+            _lastResult[svc.Id] = result.Message;
+
+            if (_statuses is not null)
+            {
+                _statuses[svc.Id] = await ServiceControl.GetStatusAsync(svc);
+            }
+        }
+        finally
+        {
+            _busy.Remove(svc.Id);
+            StateHasChanged();
+        }
+    }
+
+    private static string StateCss(ServiceRunState? state) => state switch
+    {
+        ServiceRunState.Started => "ok",
+        ServiceRunState.Stopped => "neutral",
+        ServiceRunState.Crashed => "danger",
+        ServiceRunState.Starting or ServiceRunState.Stopping => "warn",
+        _ => "neutral",
+    };
+}

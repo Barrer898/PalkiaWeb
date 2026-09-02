@@ -1,0 +1,40 @@
+
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Palkia.Web", "src\Palkia.Web\Palkia.Web.csproj", "{4A14075A-C8BD-4875-8B43-C02CE601E734}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Palkia.Core", "src\Palkia.Core\Palkia.Core.csproj", "{9120BD6F-B9A5-465D-B6C8-D89770084B7D}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Palkia.Infra", "src\Palkia.Infra\Palkia.Infra.csproj", "{C7BCE20B-FB4F-4E50-B91C-A3BED7614137}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Palkia.Data", "src\Palkia.Data\Palkia.Data.csproj", "{F7A55553-E7FF-444E-AF90-B8D5F4E3ACBF}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{4A14075A-C8BD-4875-8B43-C02CE601E734}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{4A14075A-C8BD-4875-8B43-C02CE601E734}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{4A14075A-C8BD-4875-8B43-C02CE601E734}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{4A14075A-C8BD-4875-8B43-C02CE601E734}.Release|Any CPU.Build.0 = Release|Any CPU
+		{9120BD6F-B9A5-465D-B6C8-D89770084B7D}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{9120BD6F-B9A5-465D-B6C8-D89770084B7D}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{9120BD6F-B9A5-465D-B6C8-D89770084B7D}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{9120BD6F-B9A5-465D-B6C8-D89770084B7D}.Release|Any CPU.Build.0 = Release|Any CPU
+		{C7BCE20B-FB4F-4E50-B91C-A3BED7614137}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{C7BCE20B-FB4F-4E50-B91C-A3BED7614137}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{C7BCE20B-FB4F-4E50-B91C-A3BED7614137}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{C7BCE20B-FB4F-4E50-B91C-A3BED7614137}.Release|Any CPU.Build.0 = Release|Any CPU
+		{F7A55553-E7FF-444E-AF90-B8D5F4E3ACBF}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{F7A55553-E7FF-444E-AF90-B8D5F4E3ACBF}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{F7A55553-E7FF-444E-AF90-B8D5F4E3ACBF}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{F7A55553-E7FF-444E-AF90-B8D5F4E3ACBF}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+EndGlobal

@@ -1,0 +1,15 @@
+<div class="nav-sidebar">
+    <div class="nav-brand">Palkia</div>
+
+    <nav>
+        <NavLink href="" Match="NavLinkMatch.All">Dashboard</NavLink>
+        <NavLink href="services">Services</NavLink>
+
+        <AuthorizeView Policy="AdminOnly">
+            <Authorized>
+                <div class="nav-section">Admin</div>
+                <NavLink href="admin/users">Users</NavLink>
+            </Authorized>
+        </AuthorizeView>
+    </nav>
+</div>

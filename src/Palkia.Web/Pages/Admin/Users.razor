@@ -1,0 +1,127 @@
+@page "/admin/users"
+@attribute [Authorize(Policy = "AdminOnly")]
+@using Microsoft.AspNetCore.Identity
+@inject UserManager<ApplicationUser> UserManager
+
+<h1>Users</h1>
+
+<table class="status-table">
+    <thead>
+        <tr>
+            <th>Username</th>
+            <th>Display name</th>
+            <th>Role</th>
+            <th>Created</th>
+        </tr>
+    </thead>
+    <tbody>
+        @foreach (var u in _users)
+        {
+            <tr>
+                <td>@u.UserName</td>
+                <td>@u.DisplayName</td>
+                <td>@u.Role</td>
+                <td>@u.CreatedAtUtc.ToLocalTime().ToString("yyyy-MM-dd")</td>
+            </tr>
+        }
+    </tbody>
+</table>
+
+<h2>Add user</h2>
+
+<EditForm Model="_form" OnValidSubmit="CreateUserAsync">
+    <DataAnnotationsValidator />
+    <ValidationSummary />
+
+    <div class="form-row">
+        <label>Username</label>
+        <InputText @bind-Value="_form.Username" />
+    </div>
+    <div class="form-row">
+        <label>Display name</label>
+        <InputText @bind-Value="_form.DisplayName" />
+    </div>
+    <div class="form-row">
+        <label>Temporary password</label>
+        <InputText @bind-Value="_form.Password" type="password" />
+    </div>
+    <div class="form-row">
+        <label>Role</label>
+        <InputSelect @bind-Value="_form.Role">
+            <option value="User">User</option>
+            <option value="Admin">Admin</option>
+        </InputSelect>
+    </div>
+
+    <button class="btn" type="submit">Create account</button>
+</EditForm>
+
+@if (!string.IsNullOrWhiteSpace(_message))
+{
+    <p class="@(_success ? "success" : "error")">@_message</p>
+}
+
+@code {
+    private sealed record UserRow(string UserName, string DisplayName, string Role, DateTimeOffset CreatedAtUtc);
+
+    private List<UserRow> _users = new();
+    private CreateUserForm _form = new();
+    private string? _message;
+    private bool _success;
+
+    protected override async Task OnInitializedAsync() => await LoadUsersAsync();
+
+    private async Task LoadUsersAsync()
+    {
+        var rows = new List<UserRow>();
+        foreach (var user in UserManager.Users.ToList())
+        {
+            var roles = await UserManager.GetRolesAsync(user);
+            rows.Add(new UserRow(
+                user.UserName ?? "(none)",
+                user.DisplayName,
+                roles.FirstOrDefault() ?? "(none)",
+                user.CreatedAtUtc));
+        }
+        _users = rows.OrderBy(r => r.UserName).ToList();
+    }
+
+    private async Task CreateUserAsync()
+    {
+        var user = new ApplicationUser
+        {
+            UserName = _form.Username,
+            DisplayName = _form.DisplayName,
+        };
+
+        var result = await UserManager.CreateAsync(user, _form.Password);
+        if (result.Succeeded)
+        {
+            await UserManager.AddToRoleAsync(user, _form.Role);
+            _success = true;
+            _message = $"Created '{_form.Username}'. Have them sign in and change the password.";
+            _form = new CreateUserForm();
+            await LoadUsersAsync();
+        }
+        else
+        {
+            _success = false;
+            _message = string.Join("; ", result.Errors.Select(e => e.Description));
+        }
+    }
+
+    private sealed class CreateUserForm
+    {
+        [System.ComponentModel.DataAnnotations.Required]
+        public string Username { get; set; } = string.Empty;
+
+        [System.ComponentModel.DataAnnotations.Required]
+        public string DisplayName { get; set; } = string.Empty;
+
+        [System.ComponentModel.DataAnnotations.Required]
+        [System.ComponentModel.DataAnnotations.MinLength(10)]
+        public string Password { get; set; } = string.Empty;
+
+        public string Role { get; set; } = "User";
+    }
+}

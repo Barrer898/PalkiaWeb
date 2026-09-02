@@ -1,0 +1,25 @@
+@inherits LayoutComponentBase
+
+<div class="app-shell">
+    <NavMenu />
+
+    <main class="app-main">
+        <div class="app-topbar">
+            <span class="app-title">Palkia</span>
+            <AuthorizeView>
+                <Authorized>
+                    <span class="app-user">
+                        @context.User.Identity?.Name
+                        <form method="post" action="/Account/Logout" class="inline-form">
+                            <button type="submit" class="link-button">Sign out</button>
+                        </form>
+                    </span>
+                </Authorized>
+            </AuthorizeView>
+        </div>
+
+        <article class="app-content">
+            @Body
+        </article>
+    </main>
+</div>

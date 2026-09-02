@@ -1,0 +1,35 @@
+#!/sbin/openrc-run
+# /etc/init.d/palkia-web
+# Runs the published Palkia app under supervise-daemon (OpenRC's
+# respawn-capable supervisor - the rough equivalent of systemd's
+# Restart=on-failure) as the unprivileged 'palkia' user.
+
+name="palkia-web"
+description="Palkia homeserver control panel (ASP.NET Core / Blazor Server)"
+
+: "${palkia_dir:=/opt/palkia}"
+: "${palkia_user:=palkia}"
+: "${palkia_dll:=Palkia.Web.dll}"
+
+command="/usr/bin/dotnet"
+command_args="${palkia_dir}/${palkia_dll}"
+command_user="${palkia_user}:${palkia_user}"
+command_background="yes"
+
+supervisor="supervise-daemon"
+pidfile="/run/${RC_SVCNAME}.pid"
+
+output_log="/var/log/palkia/palkia-web.log"
+error_log="/var/log/palkia/palkia-web.err"
+
+directory="${palkia_dir}"
+
+depend() {
+	need net
+	after samba nfs
+}
+
+start_pre() {
+	checkpath -d -m 0750 -o "${palkia_user}:${palkia_user}" /var/log/palkia
+	checkpath -d -m 0750 -o "${palkia_user}:${palkia_user}" /var/lib/palkia
+}

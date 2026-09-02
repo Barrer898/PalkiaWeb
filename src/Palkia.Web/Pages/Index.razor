@@ -1,0 +1,14 @@
+@page "/"
+@attribute [Authorize]
+
+<h1>Dashboard</h1>
+
+<p>
+    Welcome<AuthorizeView><Authorized> back, @context.User.Identity?.Name</Authorized></AuthorizeView>.
+</p>
+
+<p>
+    This is a placeholder. Once the resource broker lands (phase 2) this page
+    will show live CPU/RAM/VRAM headroom and the job queue via SignalR. For
+    now, head to <a href="services">Services</a> to check on Samba/NFS.
+</p>

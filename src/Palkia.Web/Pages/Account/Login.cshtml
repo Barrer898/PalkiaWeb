@@ -1,0 +1,39 @@
+@page
+@model Palkia.Web.Pages.Account.LoginModel
+@{
+    ViewData["Title"] = "Sign in";
+}
+
+<div class="auth-card">
+    <h1>Palkia</h1>
+
+    <form method="post">
+        <input type="hidden" asp-for="ReturnUrl" />
+
+        <div class="form-row">
+            <label asp-for="Input.Username">Username</label>
+            <input asp-for="Input.Username" autofocus />
+            <span asp-validation-for="Input.Username" class="error"></span>
+        </div>
+
+        <div class="form-row">
+            <label asp-for="Input.Password">Password</label>
+            <input asp-for="Input.Password" type="password" />
+            <span asp-validation-for="Input.Password" class="error"></span>
+        </div>
+
+        <div class="form-row checkbox-row">
+            <label>
+                <input asp-for="Input.RememberMe" />
+                Remember me
+            </label>
+        </div>
+
+        @if (!string.IsNullOrWhiteSpace(Model.ErrorMessage))
+        {
+            <p class="error">@Model.ErrorMessage</p>
+        }
+
+        <button class="btn" type="submit">Sign in</button>
+    </form>
+</div>

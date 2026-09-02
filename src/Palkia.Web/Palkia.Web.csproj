@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Palkia.Web</RootNamespace>
+    <UserSecretsId>palkia-web-dev</UserSecretsId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Palkia.Core\Palkia.Core.csproj" />
+    <ProjectReference Include="..\Palkia.Infra\Palkia.Infra.csproj" />
+    <ProjectReference Include="..\Palkia.Data\Palkia.Data.csproj" />
+  </ItemGroup>
+
+
+</Project>
