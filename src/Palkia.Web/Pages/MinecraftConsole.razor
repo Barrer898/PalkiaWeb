@@ -19,10 +19,17 @@
 
 <AuthorizeView Policy="AdminOnly" Context="authCtx">
     <Authorized>
+        @if (!_ready)
+        {
+            <p class="muted">
+                Server isn't ready for commands (still starting, shutting down, or not running) -
+                sending unlocks once the log shows "Done".
+            </p>
+        }
         <EditForm Model="_form" OnValidSubmit="SendAsync">
             <div class="console-input-row">
                 <InputText @bind-Value="_form.Command" placeholder="Command, no leading slash (e.g. say hello, whitelist add Steve)" />
-                <button class="btn" type="submit" disabled="@_sending">Send</button>
+                <button class="btn" type="submit" disabled="@(_sending || !_ready)">Send</button>
             </div>
         </EditForm>
         @if (!string.IsNullOrWhiteSpace(_message))
@@ -44,12 +51,14 @@
     private readonly CancellationTokenSource _cts = new();
     private bool _sending;
     private bool _hasNewLinesSinceRender;
+    private bool _ready;
     private string? _message;
     private CommandForm _form = new();
 
     protected override async Task OnInitializedAsync()
     {
         _position = ConsoleClient.GetInitialTailPosition();
+        _ready = await ConsoleClient.IsServerReadyAsync(_cts.Token);
         await PollAsync();
         _ = RunPollLoopAsync();
     }
@@ -91,6 +100,10 @@
                 _lines.RemoveRange(0, _lines.Count - MaxLines);
             }
             _hasNewLinesSinceRender = true;
+
+            // Readiness can only change when the log changes, so only
+            // re-check then rather than re-scanning on every idle tick.
+            _ready = await ConsoleClient.IsServerReadyAsync(_cts.Token);
         }
         _position = result.NextPosition;
     }

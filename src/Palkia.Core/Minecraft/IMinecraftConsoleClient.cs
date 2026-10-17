@@ -16,7 +16,20 @@ public interface IMinecraftConsoleClient
     /// Sends one line to the server's console, as if typed at a terminal
     /// attached to it (no leading slash - "say hello", not "/say hello").
     /// </summary>
+    /// <remarks>
+    /// Refuses (returns Succeeded=false) while the server is still starting or
+    /// shutting down - see <see cref="IsServerReadyAsync"/> for why.
+    /// </remarks>
     Task<ConsoleCommandResult> SendCommandAsync(string command, CancellationToken ct = default);
+
+    /// <summary>
+    /// True once the server has finished starting up ("Done (...)! For help,
+    /// type "help"" in the log) and hasn't begun shutting down since. Commands
+    /// read from stdin during startup are turned into command sources before the
+    /// world exists, and then crash with a NullPointerException when they finally
+    /// run - so sending before this is true is never useful.
+    /// </summary>
+    Task<bool> IsServerReadyAsync(CancellationToken ct = default);
 
     /// <summary>
     /// A reasonable starting byte offset for a fresh console view - roughly

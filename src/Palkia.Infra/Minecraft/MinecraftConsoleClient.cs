@@ -7,14 +7,14 @@ namespace Palkia.Infra.Minecraft;
 /// <summary>
 /// How this actually works, since it's not obvious from the interface alone:
 ///
-/// OpenRC's supervise-daemon normally only lets you redirect the child
-/// process's stdout/stderr (output_log/error_log) - there's no equivalent
-/// for feeding it input, which is exactly what "console access" needs. The
-/// standard trick (see deploy/palkia-minecraft.initd) is a named pipe
-/// (mkfifo) passed via supervise-daemon's --stdin flag: the kernel treats
-/// it exactly like a regular file for I/O purposes, so the java process
-/// reads from it as its console input, and anything this class writes to
-/// that same path arrives as if typed at an attached terminal.
+/// The server's stdin is a named pipe (mkfifo). supervise-daemon's own
+/// --stdin flag turned out to be unusable for this: it opens the pipe
+/// read-only before starting java (so startup blocks until something writes),
+/// and java sees end-of-file as soon as the first writer closes (so only the
+/// first command ever works). deploy/palkia-minecraft-launch.sh instead opens
+/// the pipe read-WRITE as java's stdin, so java holds its own write end and
+/// never sees EOF, and nothing blocks at startup. Anything this class writes
+/// to that path arrives as if typed at an attached terminal.
 ///
 /// Reading output is much simpler - just tail the log file supervise-daemon
 /// is already writing stdout to, tracking a byte offset between polls
@@ -22,6 +22,11 @@ namespace Palkia.Infra.Minecraft;
 /// </summary>
 public sealed class MinecraftConsoleClient : IMinecraftConsoleClient
 {
+    // How much of the end of the log IsServerReadyAsync scans for startup/
+    // shutdown markers. Big enough to cover a normal session's startup, small
+    // enough to be a trivial read.
+    private const int ReadyScanWindowBytes = 256 * 1024;
+
     private readonly MinecraftConsoleOptions _options;
     private readonly ILogger<MinecraftConsoleClient> _logger;
 
@@ -44,6 +49,13 @@ public sealed class MinecraftConsoleClient : IMinecraftConsoleClient
                 $"Console pipe not found at '{_options.ConsoleFifoPath}'. It only exists while the " +
                 "OpenRC service is configured with --stdin and has been started at least once - see " +
                 "deploy/README.md if this keeps happening.");
+        }
+
+        if (!await IsServerReadyAsync(ct))
+        {
+            return new ConsoleCommandResult(false,
+                "The server isn't ready for commands yet (still starting, shutting down, or not running). " +
+                "Wait until the log shows 'Done (...)! For help, type \"help\"'.");
         }
 
         try
@@ -74,6 +86,45 @@ public sealed class MinecraftConsoleClient : IMinecraftConsoleClient
             _logger.LogWarning(ex, "Failed to send Minecraft console command.");
             return new ConsoleCommandResult(false, $"Failed to send command: {ex.Message}");
         }
+    }
+
+    public async Task<bool> IsServerReadyAsync(CancellationToken ct = default)
+    {
+        if (!File.Exists(_options.LogPath))
+        {
+            return false;
+        }
+
+        await using var stream = new FileStream(
+            _options.LogPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+
+        stream.Seek(Math.Max(0, stream.Length - ReadyScanWindowBytes), SeekOrigin.Begin);
+        using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: false);
+
+        // The log is appended to across restarts, so only the LAST marker in
+        // the window matters: a startup line means "not ready", the "Done"
+        // line means ready, a shutdown line means not ready again.
+        bool? ready = null;
+        string? line;
+        while ((line = await reader.ReadLineAsync(ct)) is not null)
+        {
+            if (line.Contains("Starting org.bukkit.craftbukkit.Main", StringComparison.Ordinal) ||
+                line.Contains("Stopping server", StringComparison.Ordinal) ||
+                line.Contains("Stopping the server", StringComparison.Ordinal))
+            {
+                ready = false;
+            }
+            else if (line.Contains("Done (", StringComparison.Ordinal) &&
+                     line.Contains("For help, type", StringComparison.Ordinal))
+            {
+                ready = true;
+            }
+        }
+
+        // No marker in the window at all means a long-running session whose
+        // startup scrolled out of it - treat that as ready rather than
+        // blocking commands forever.
+        return ready ?? true;
     }
 
     public long GetInitialTailPosition(int approxLinesFromEnd = 150)
