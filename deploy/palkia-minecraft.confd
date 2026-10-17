@@ -1,0 +1,20 @@
+# /etc/conf.d/minecraft
+
+minecraft_dir="/var/lib/minecraft"
+minecraft_user="minecraft"
+minecraft_jar="paper.jar"
+minecraft_heap="5G"
+
+# Hard resource ceiling enforced by the kernel, independent of whatever the
+# JVM heap flags say. Must agree with Minecraft:CpuCores / Minecraft:MemoryMb
+# in the app's appsettings.json (default 2 cores / 6144MB) - the broker only
+# controls *when* this is allowed to start, not how much it's actually
+# limited to while running; that's still this file's job.
+#
+# cpu.max "200000 100000" = 2 full cores (200ms runtime per 100ms period).
+# memory.max leaves a little headroom above -Xmx for JVM overhead outside
+# the heap (metaspace, thread stacks, direct buffers, GC bookkeeping).
+rc_cgroup_settings="
+cpu.max 200000 100000
+memory.max 6G
+"

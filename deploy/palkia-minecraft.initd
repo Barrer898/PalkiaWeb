@@ -1,0 +1,73 @@
+#!/sbin/openrc-run
+# /etc/init.d/minecraft
+#
+# Runs a Paper server under supervise-daemon as a dedicated, unprivileged
+# 'minecraft' user - deliberately separate from 'palkia' (the app account),
+# so the control panel never needs filesystem access to the world data, and
+# a Minecraft-side compromise (a malicious plugin, say) doesn't inherit the
+# app's ability to talk to the rc-ctl wrapper.
+#
+# IMPORTANT: the heap size below and rc_cgroup_settings memory.max in
+# /etc/conf.d/minecraft must both agree with Minecraft:MemoryMb in the app's
+# appsettings.json (default 6144MB / 6G). None of these are derived from
+# each other - if you change one, change all three. See deploy/README.md.
+#
+# CONSOLE ACCESS: the server's stdin is a named pipe (mkfifo) that the
+# Palkia app writes commands into. supervise-daemon's --stdin flag did NOT
+# attach it on this box (java's fd 0 ended up as /dev/null), so the pipe is
+# wired up by /usr/local/sbin/palkia-minecraft-launch instead, which opens
+# it read-write as stdin - see that script for why read-write matters.
+# The pipe is group-writable by 'minecraft' so the app (once added to that
+# group - see deploy/README.md) can write without needing root.
+
+name="minecraft"
+description="Minecraft (Paper) server - single instance, leased via Palkia"
+
+: "${minecraft_dir:=/var/lib/minecraft}"
+: "${minecraft_user:=minecraft}"
+: "${minecraft_jar:=paper.jar}"
+: "${minecraft_heap:=5G}"
+: "${minecraft_console_fifo:=${minecraft_dir}/console.fifo}"
+
+command="/usr/local/sbin/palkia-minecraft-launch"
+command_args="${minecraft_dir} ${minecraft_jar} ${minecraft_heap} ${minecraft_console_fifo}"
+command_user="${minecraft_user}:${minecraft_user}"
+command_background="yes"
+
+supervisor="supervise-daemon"
+pidfile="/run/${RC_SVCNAME}.pid"
+
+output_log="/var/log/minecraft/minecraft.log"
+error_log="/var/log/minecraft/minecraft.err"
+
+directory="${minecraft_dir}"
+
+depend() {
+	need net
+	# Deliberately no "after palkia-web" - the app never needs to be up for
+	# Minecraft to run, and shouldn't be a dependency of it.
+}
+
+start_pre() {
+	checkpath -d -m 0750 -o "${minecraft_user}:${minecraft_user}" /var/log/minecraft
+
+	if [ ! -f "${minecraft_dir}/eula.txt" ]; then
+		eerror "eula.txt not found in ${minecraft_dir} - Mojang's EULA must be"
+		eerror "accepted manually (create eula.txt with 'eula=true') before this"
+		eerror "will start. See deploy/README.md."
+		return 1
+	fi
+
+	if [ ! -x "${command}" ]; then
+		eerror "${command} is missing or not executable - install"
+		eerror "deploy/palkia-minecraft-launch.sh there (root:root, 0755)."
+		return 1
+	fi
+
+	if [ ! -p "${minecraft_console_fifo}" ]; then
+		einfo "Creating console pipe at ${minecraft_console_fifo}"
+		rm -f "${minecraft_console_fifo}"
+		mkfifo -m 0660 "${minecraft_console_fifo}"
+		chown "${minecraft_user}:${minecraft_user}" "${minecraft_console_fifo}"
+	fi
+}
