@@ -1,0 +1,199 @@
+@page "/minecraft"
+@attribute [Authorize]
+@implements IDisposable
+@inject IResourceBroker Broker
+@inject IServiceControlClient ServiceControl
+@inject MinecraftOptions MinecraftOptions
+
+<h1>Minecraft</h1>
+
+<p class="muted">
+    Single instance, resource-leased. Requesting @MinecraftOptions.CpuCores
+    cores / @MinecraftOptions.MemoryMb MB before it's allowed to start - see
+    the <a href="/">dashboard</a> for the shared budget this draws from.
+</p>
+
+<div class="status-line">
+    <span class="badge badge-@StateCss()">@StateLabel()</span>
+</div>
+
+@if (_lease is { State: LeaseState.Queued })
+{
+    <p>
+        Waiting for enough free CPU/RAM to start - it'll launch automatically
+        the moment something else frees up room, no need to keep retrying.
+    </p>
+    <button class="btn" disabled="@_busy" @onclick="CancelQueuedAsync">Cancel</button>
+}
+else if (_lease is { State: LeaseState.Active })
+{
+    <p>
+        Lease active. If this just started, give Paper a minute to actually
+        finish booting before expecting players to be able to join.
+    </p>
+    <button class="btn" disabled="@_busy" @onclick="StopAsync">Stop</button>
+}
+else
+{
+    <button class="btn" disabled="@_busy" @onclick="StartAsync">Start</button>
+}
+
+<p class="muted">
+    <a href="/minecraft/console">Open console &rarr;</a>
+</p>
+
+@if (!string.IsNullOrWhiteSpace(_message))
+{
+    <pre class="output-box">@_message</pre>
+}
+
+@code {
+    private static readonly ManagedService MinecraftService = ManagedServiceCatalog.Find("minecraft")!;
+
+    private Lease? _lease;
+    private bool _serviceStartRequested;
+    private bool _busy;
+    private string? _message;
+    private ServiceRunState _rawState = ServiceRunState.Unknown;
+
+    protected override async Task OnInitializedAsync()
+    {
+        Broker.StateChanged += OnBrokerStateChanged;
+
+        // Someone else (another tab, another household member, or the
+        // startup reconciliation step) may already hold this lease - find
+        // it rather than assuming we're starting from a clean slate.
+        _lease = Broker.ActiveLeases.FirstOrDefault(l => l.Request.ServiceId == MinecraftService.Id)
+            ?? Broker.QueuedLeases.FirstOrDefault(l => l.Request.ServiceId == MinecraftService.Id);
+        _serviceStartRequested = _lease is { State: LeaseState.Active };
+
+        var status = await ServiceControl.GetStatusAsync(MinecraftService);
+        _rawState = status.State;
+    }
+
+    private async Task StartAsync()
+    {
+        _busy = true;
+        _message = null;
+        StateHasChanged();
+
+        try
+        {
+            var amount = new ResourceBudget(MinecraftOptions.CpuCores, MinecraftOptions.MemoryMb, 0);
+
+            try
+            {
+                _lease = Broker.RequestLease(new LeaseRequest(MinecraftService.Id, MinecraftService.DisplayName, amount));
+            }
+            catch (LeaseRejectedException ex)
+            {
+                _message = ex.Message;
+                return;
+            }
+
+            if (_lease.State == LeaseState.Active)
+            {
+                await StartServiceForActiveLeaseAsync();
+            }
+            // If Queued instead, OnBrokerStateChanged picks up the transition
+            // to Active whenever the broker promotes it and starts the
+            // service at that point - nothing more to do here right now.
+        }
+        finally
+        {
+            _busy = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task StopAsync()
+    {
+        _busy = true;
+        StateHasChanged();
+
+        try
+        {
+            var result = await ServiceControl.StopAsync(MinecraftService);
+            _message = result.Message;
+            _rawState = (await ServiceControl.GetStatusAsync(MinecraftService)).State;
+        }
+        finally
+        {
+            if (_lease is not null)
+            {
+                Broker.ReleaseLease(_lease.Id);
+                _lease = null;
+                _serviceStartRequested = false;
+            }
+            _busy = false;
+            StateHasChanged();
+        }
+    }
+
+    private Task CancelQueuedAsync()
+    {
+        if (_lease is { State: LeaseState.Queued })
+        {
+            Broker.ReleaseLease(_lease.Id);
+            _lease = null;
+        }
+        return Task.CompletedTask;
+    }
+
+    // Fires from the broker whenever any lease anywhere changes - including
+    // ones for other services once later phases add them. We only care when
+    // it affects our own lease going from Queued to Active.
+    private void OnBrokerStateChanged()
+    {
+        _ = InvokeAsync(async () =>
+        {
+            if (_lease is { State: LeaseState.Active } && !_serviceStartRequested)
+            {
+                await StartServiceForActiveLeaseAsync();
+            }
+
+            StateHasChanged();
+        });
+    }
+
+    private async Task StartServiceForActiveLeaseAsync()
+    {
+        _serviceStartRequested = true;
+
+        var result = await ServiceControl.StartAsync(MinecraftService);
+        _message = result.Message;
+
+        if (!result.Succeeded)
+        {
+            // The lease was granted but the actual process failed to start -
+            // give the resources back rather than holding them for nothing.
+            if (_lease is not null)
+            {
+                Broker.ReleaseLease(_lease.Id);
+            }
+            _lease = null;
+            _serviceStartRequested = false;
+        }
+
+        _rawState = (await ServiceControl.GetStatusAsync(MinecraftService)).State;
+    }
+
+    private string StateLabel() => _lease switch
+    {
+        { State: LeaseState.Queued } => "Queued",
+        { State: LeaseState.Active } => $"Lease active - {_rawState}",
+        _ => _rawState == ServiceRunState.Started ? "Running (no lease - was this started outside Palkia?)" : "Stopped",
+    };
+
+    private string StateCss() => _lease switch
+    {
+        { State: LeaseState.Queued } => "warn",
+        { State: LeaseState.Active } => "ok",
+        _ => "neutral",
+    };
+
+    public void Dispose()
+    {
+        Broker.StateChanged -= OnBrokerStateChanged;
+    }
+}

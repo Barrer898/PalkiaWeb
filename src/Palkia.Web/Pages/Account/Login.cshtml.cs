@@ -21,10 +21,17 @@ public sealed class LoginModel : PageModel
     [BindProperty(SupportsGet = true)]
     public string? ReturnUrl { get; set; }
 
+    [BindProperty(SupportsGet = true)]
+    public string? Reason { get; set; }
+
     public string? ErrorMessage { get; private set; }
 
     public void OnGet()
     {
+        if (Reason == "idle")
+        {
+            ErrorMessage = "You were signed out after a period of inactivity.";
+        }
     }
 
     public async Task<IActionResult> OnPostAsync()

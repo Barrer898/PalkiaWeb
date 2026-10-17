@@ -12,7 +12,8 @@ public sealed record ManagedService(
     string DisplayName,
     string RcName,
     string Description,
-    bool AdminOnly = true);
+    bool AdminOnly = true,
+    bool BrokerManaged = false);
 
 /// <summary>
 /// Central, hardcoded catalog of services the UI is allowed to show/control.
@@ -43,8 +44,20 @@ public static class ManagedServiceCatalog
             RcName: "nfsclient",
             Description: "rpc.statd/idmapd support required by the NFS server.",
             AdminOnly: true),
+
+        new ManagedService(
+            Id: "minecraft",
+            DisplayName: "Minecraft",
+            RcName: "minecraft",
+            Description: "Single Paper server instance, resource-leased via the broker.",
+            AdminOnly: false,
+            BrokerManaged: true),
     };
 
     public static ManagedService? Find(string id) =>
         All.FirstOrDefault(s => string.Equals(s.Id, id, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>Services safe for the generic Services page to start/stop directly -
+    /// excludes anything BrokerManaged, which needs to go through a lease first.</summary>
+    public static IEnumerable<ManagedService> DirectlyControllable => All.Where(s => !s.BrokerManaged);
 }

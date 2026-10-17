@@ -19,7 +19,7 @@ else
             </tr>
         </thead>
         <tbody>
-            @foreach (var svc in ManagedServiceCatalog.All)
+            @foreach (var svc in ManagedServiceCatalog.DirectlyControllable)
             {
                 var status = _statuses.GetValueOrDefault(svc.Id);
                 <tr>
@@ -33,13 +33,18 @@ else
                         </span>
                     </td>
                     <td>
-                        <AuthorizeView Policy="AdminOnly" Context="authCtx">
-                            <Authorized>
-                                <button class="btn" disabled="@IsBusy(svc.Id)" @onclick="() => StartAsync(svc)">Start</button>
-                                <button class="btn" disabled="@IsBusy(svc.Id)" @onclick="() => StopAsync(svc)">Stop</button>
-                                <button class="btn" disabled="@IsBusy(svc.Id)" @onclick="() => RestartAsync(svc)">Restart</button>
-                            </Authorized>
-                        </AuthorizeView>
+                        @if (svc.AdminOnly)
+                        {
+                            <AuthorizeView Policy="AdminOnly" Context="authCtx">
+                                <Authorized>
+                                    @RenderServiceButtons(svc)
+                                </Authorized>
+                            </AuthorizeView>
+                        }
+                        else
+                        {
+                            @RenderServiceButtons(svc)
+                        }
                     </td>
                 </tr>
                 @if (_lastResult.TryGetValue(svc.Id, out var msg) && !string.IsNullOrWhiteSpace(msg))
@@ -65,13 +70,19 @@ else
     private async Task RefreshAllAsync()
     {
         var results = new Dictionary<string, ServiceStatus>();
-        foreach (var svc in ManagedServiceCatalog.All)
+        foreach (var svc in ManagedServiceCatalog.DirectlyControllable)
         {
             results[svc.Id] = await ServiceControl.GetStatusAsync(svc);
         }
         _statuses = results;
         StateHasChanged();
     }
+
+    private RenderFragment RenderServiceButtons(ManagedService svc) => @<text>
+        <button class="btn" disabled="@IsBusy(svc.Id)" @onclick="() => StartAsync(svc)">Start</button>
+        <button class="btn" disabled="@IsBusy(svc.Id)" @onclick="() => StopAsync(svc)">Stop</button>
+        <button class="btn" disabled="@IsBusy(svc.Id)" @onclick="() => RestartAsync(svc)">Restart</button>
+    </text>;
 
     private bool IsBusy(string id) => _busy.Contains(id);
 

@@ -1,0 +1,132 @@
+@page "/minecraft/console"
+@attribute [Authorize]
+@implements IAsyncDisposable
+@inject IMinecraftConsoleClient ConsoleClient
+@inject IJSRuntime JS
+
+<h1>Minecraft Console</h1>
+
+<p class="muted">
+    <a href="/minecraft">&larr; Back to Minecraft</a>
+</p>
+
+<div id="console-log" class="console-log">
+    @foreach (var line in _lines)
+    {
+        <div>@line</div>
+    }
+</div>
+
+<AuthorizeView Policy="AdminOnly" Context="authCtx">
+    <Authorized>
+        <EditForm Model="_form" OnValidSubmit="SendAsync">
+            <div class="console-input-row">
+                <InputText @bind-Value="_form.Command" placeholder="Command, no leading slash (e.g. say hello, whitelist add Steve)" />
+                <button class="btn" type="submit" disabled="@_sending">Send</button>
+            </div>
+        </EditForm>
+        @if (!string.IsNullOrWhiteSpace(_message))
+        {
+            <p class="muted">@_message</p>
+        }
+    </Authorized>
+    <NotAuthorized>
+        <p class="muted">Only admins can send console commands - arbitrary commands can op/ban/kick players or change game rules, which is a step up from just starting or stopping the server.</p>
+    </NotAuthorized>
+</AuthorizeView>
+
+@code {
+    private const int MaxLines = 500;
+
+    private readonly List<string> _lines = new();
+    private long _position;
+    private PeriodicTimer? _timer;
+    private readonly CancellationTokenSource _cts = new();
+    private bool _sending;
+    private bool _hasNewLinesSinceRender;
+    private string? _message;
+    private CommandForm _form = new();
+
+    protected override async Task OnInitializedAsync()
+    {
+        _position = ConsoleClient.GetInitialTailPosition();
+        await PollAsync();
+        _ = RunPollLoopAsync();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender || _hasNewLinesSinceRender)
+        {
+            _hasNewLinesSinceRender = false;
+            await JS.InvokeVoidAsync("palkiaScrollToBottom", "console-log");
+        }
+    }
+
+    private async Task RunPollLoopAsync()
+    {
+        _timer = new PeriodicTimer(TimeSpan.FromSeconds(1.5));
+        try
+        {
+            while (await _timer.WaitForNextTickAsync(_cts.Token))
+            {
+                await PollAsync();
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // expected on dispose
+        }
+    }
+
+    private async Task PollAsync()
+    {
+        var result = await ConsoleClient.ReadNewLinesAsync(_position, _cts.Token);
+        if (result.NewLines.Count > 0)
+        {
+            _lines.AddRange(result.NewLines);
+            if (_lines.Count > MaxLines)
+            {
+                _lines.RemoveRange(0, _lines.Count - MaxLines);
+            }
+            _hasNewLinesSinceRender = true;
+        }
+        _position = result.NextPosition;
+    }
+
+    private async Task SendAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_form.Command))
+        {
+            return;
+        }
+
+        _sending = true;
+        try
+        {
+            var result = await ConsoleClient.SendCommandAsync(_form.Command, _cts.Token);
+            _message = result.Message;
+            if (result.Succeeded)
+            {
+                _form.Command = string.Empty;
+            }
+        }
+        finally
+        {
+            _sending = false;
+        }
+    }
+
+    private sealed class CommandForm
+    {
+        public string Command { get; set; } = string.Empty;
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        _cts.Cancel();
+        _timer?.Dispose();
+        _cts.Dispose();
+    }
+}

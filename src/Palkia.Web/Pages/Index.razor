@@ -1,5 +1,8 @@
 @page "/"
 @attribute [Authorize]
+@implements IAsyncDisposable
+@inject IResourceBroker Broker
+@inject ISystemMetricsProvider Metrics
 
 <h1>Dashboard</h1>
 
@@ -7,8 +10,199 @@
     Welcome<AuthorizeView><Authorized> back, @context.User.Identity?.Name</Authorized></AuthorizeView>.
 </p>
 
-<p>
-    This is a placeholder. Once the resource broker lands (phase 2) this page
-    will show live CPU/RAM/VRAM headroom and the job queue via SignalR. For
-    now, head to <a href="services">Services</a> to check on Samba/NFS.
+<h2>Host</h2>
+
+@{
+    var m = Metrics.GetLatest();
+}
+<table class="status-table">
+    <tbody>
+        <tr>
+            <td class="muted">CPU usage</td>
+            <td>@FormatPercent(m.CpuUsagePercent)</td>
+        </tr>
+        <tr>
+            <td class="muted">RAM used</td>
+            <td>@FormatMbPair(m.RamUsedMb, m.RamTotalMb)</td>
+        </tr>
+        <tr>
+            <td class="muted">Free swap</td>
+            <td>@FormatMbPair(m.SwapFreeMb, m.SwapTotalMb)</td>
+        </tr>
+        <tr>
+            <td class="muted">GPU usage</td>
+            <td>@FormatPercent(m.GpuUsagePercent)</td>
+        </tr>
+        <tr>
+            <td class="muted">VRAM used</td>
+            <td>@FormatMbPair(m.GpuVramUsedMb, m.GpuVramTotalMb)</td>
+        </tr>
+    </tbody>
+</table>
+<p class="muted">
+    Actual host usage, independent of the broker below - this reflects
+    everything running on the box, not just what Palkia knows about.
+    @if (m.SampledAtUtc > DateTimeOffset.MinValue)
+    {
+        <text>Last sampled @m.SampledAtUtc.ToLocalTime().ToString("HH:mm:ss").</text>
+    }
 </p>
+
+<h2>Resources (broker)</h2>
+
+<table class="status-table">
+    <thead>
+        <tr>
+            <th></th>
+            <th>CPU cores</th>
+            <th>RAM (MB)</th>
+            <th>VRAM (MB)</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td class="muted">Total budget</td>
+            <td>@Broker.Budget.CpuCores</td>
+            <td>@Broker.Budget.MemoryMb</td>
+            <td>@Broker.Budget.VramMb</td>
+        </tr>
+        <tr>
+            <td class="muted">Available now</td>
+            <td>@Broker.Available.CpuCores</td>
+            <td>@Broker.Available.MemoryMb</td>
+            <td>@Broker.Available.VramMb</td>
+        </tr>
+    </tbody>
+</table>
+<p class="muted">
+    Budget is deliberately less than the box's full specs (4 cores / 16384MB
+    / 12288MB VRAM) - headroom stays reserved for the OS, this app, and
+    always-on Samba/NFS. Configurable via the ResourceBroker section in
+    appsettings.json.
+</p>
+
+<h2>Active leases</h2>
+
+@{
+    var active = Broker.ActiveLeases;
+}
+@if (active.Count == 0)
+{
+    <p class="muted">Nothing holding a lease right now.</p>
+}
+else
+{
+    <table class="status-table">
+        <thead>
+            <tr>
+                <th>Service</th>
+                <th>Holding</th>
+                <th>Since</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var lease in active)
+            {
+                <tr>
+                    <td>@lease.Request.DisplayName</td>
+                    <td>@Describe(lease.Request.Amount)</td>
+                    <td>@lease.GrantedAtUtc?.ToLocalTime().ToString("HH:mm:ss")</td>
+                </tr>
+            }
+        </tbody>
+    </table>
+}
+
+<h2>Queue</h2>
+
+@{
+    var queued = Broker.QueuedLeases;
+}
+@if (queued.Count == 0)
+{
+    <p class="muted">Nothing waiting.</p>
+}
+else
+{
+    <table class="status-table">
+        <thead>
+            <tr>
+                <th>#</th>
+                <th>Service</th>
+                <th>Wants</th>
+                <th>Waiting since</th>
+            </tr>
+        </thead>
+        <tbody>
+            @for (var i = 0; i < queued.Count; i++)
+            {
+                var lease = queued[i];
+                <tr>
+                    <td>@(i + 1)</td>
+                    <td>@lease.Request.DisplayName</td>
+                    <td>@Describe(lease.Request.Amount)</td>
+                    <td>@lease.RequestedAtUtc.ToLocalTime().ToString("HH:mm:ss")</td>
+                </tr>
+            }
+        </tbody>
+    </table>
+}
+
+<p class="muted">
+    Only Minecraft draws from the broker so far - head to
+    <a href="minecraft">Minecraft</a> to try it, or <a href="services">Services</a>
+    for Samba/NFS, which run outside the broker entirely since they're cheap
+    enough not to need leasing.
+</p>
+
+@code {
+    private PeriodicTimer? _refreshTimer;
+    private readonly CancellationTokenSource _cts = new();
+
+    protected override void OnInitialized()
+    {
+        Broker.StateChanged += OnBrokerStateChanged;
+
+        // The broker re-renders itself via StateChanged whenever a lease
+        // moves, but host metrics (CPU%/swap/GPU) change continuously with
+        // nothing to raise an event - so this page polls its own render on
+        // a timer instead. 3s matches the sampler's own interval; no point
+        // refreshing faster than new data actually arrives.
+        _ = RunMetricsRefreshLoopAsync();
+    }
+
+    private async Task RunMetricsRefreshLoopAsync()
+    {
+        _refreshTimer = new PeriodicTimer(TimeSpan.FromSeconds(3));
+        try
+        {
+            while (await _refreshTimer.WaitForNextTickAsync(_cts.Token))
+            {
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // expected on dispose
+        }
+    }
+
+    private void OnBrokerStateChanged() => InvokeAsync(StateHasChanged);
+
+    private static string Describe(ResourceBudget b) => $"{b.CpuCores} cores / {b.MemoryMb}MB RAM" +
+        (b.VramMb > 0 ? $" / {b.VramMb}MB VRAM" : string.Empty);
+
+    private static string FormatPercent(double? value) =>
+        value is { } v ? $"{v:0.#}%" : "N/A";
+
+    private static string FormatMbPair(long? part, long? total) =>
+        part is { } p && total is { } t ? $"{p:N0} / {t:N0} MB" : "N/A";
+
+    public async ValueTask DisposeAsync()
+    {
+        Broker.StateChanged -= OnBrokerStateChanged;
+        _cts.Cancel();
+        _refreshTimer?.Dispose();
+        _cts.Dispose();
+    }
+}

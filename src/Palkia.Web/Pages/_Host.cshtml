@@ -1,9 +1,12 @@
 @page "/"
 @namespace Palkia.Web.Pages
 @using Microsoft.AspNetCore.Components.Web
+@using Microsoft.Extensions.Configuration
+@inject IConfiguration Configuration
 @addTagHelper *, Microsoft.AspNetCore.Mvc.TagHelpers
 @{
     Layout = null;
+    var idleTimeoutMinutes = Configuration.GetValue("Auth:IdleTimeoutMinutes", 60);
 }
 <!DOCTYPE html>
 <html lang="en">
@@ -13,10 +16,20 @@
     <title>Palkia</title>
     <base href="~/" />
     <link rel="stylesheet" href="~/css/site.css" />
+    @if (User.Identity?.IsAuthenticated == true)
+    {
+        <meta name="idle-timeout-minutes" content="@idleTimeoutMinutes" />
+    }
 </head>
 <body>
     <component type="typeof(Palkia.Web.App)" render-mode="ServerPrerendered" />
 
     <script src="_framework/blazor.server.js"></script>
+    <script src="~/js/console-scroll.js"></script>
+    @if (User.Identity?.IsAuthenticated == true)
+    {
+        <script src="~/js/idle-timeout.js"></script>
+    }
 </body>
 </html>
+

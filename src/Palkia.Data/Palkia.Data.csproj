@@ -1,19 +1,44 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <RootNamespace>Palkia.Data</RootNamespace>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.AspNetCore.Identity.EntityFrameworkCore" Version="8.0.8" />
-    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="8.0.8" />
-    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="8.0.8">
+    <PackageReference Include="Microsoft.AspNetCore.Identity.EntityFrameworkCore" Version="10.0.11" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="10.0.11" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.11">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      Explicit overrides for two NU1903 advisories pulled in transitively.
+      NuGet resolves the highest requested version across the graph, so an
+      explicit direct reference here wins over the older version EF Core's
+      own dependency tree asks for.
+
+      - GHSA-qj66-m88j-hmgj (Microsoft.Extensions.Caching.Memory 8.0.0):
+        cleanly fixed upstream at 8.0.1+; this just pins to a current 10.x
+        build so it isn't the odd one out at 8.x.
+
+      - GHSA-2m69-gcr7-jv3q (SQLitePCLRaw.lib.e_sqlite3 <= 2.1.11, native
+        SQLite < 3.50.2): as of writing, even the latest Microsoft.Data.Sqlite
+        10.0.x still transitively pulls the vulnerable 2.1.x native bundle -
+        this is an open upstream gap, not something EF Core has patched yet.
+        The workaround several projects have converged on (see e.g.
+        dotnet/EventLogExpert#604) is exactly this: an explicit reference to
+        the newer SQLitePCLRaw.bundle_e_sqlite3 3.x line, which carries a
+        patched native SQLite build. Re-check this once EF Core ships a
+        release with it built in, and remove the override then.
+    -->
+    <PackageReference Include="Microsoft.Extensions.Caching.Memory" Version="10.0.11" />
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.5" />
   </ItemGroup>
 
 </Project>

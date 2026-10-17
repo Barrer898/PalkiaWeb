@@ -98,6 +98,39 @@ a { color: var(--accent); }
 
 .btn:disabled { opacity: 0.5; cursor: default; }
 
+.status-line { margin: 0.75rem 0; }
+
+.console-log {
+    background: #05070a;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.75rem;
+    height: 420px;
+    overflow-y: auto;
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    font-size: 0.82rem;
+    line-height: 1.4;
+    white-space: pre-wrap;
+    word-break: break-word;
+    margin-bottom: 0.75rem;
+}
+
+.console-input-row {
+    display: flex;
+    gap: 0.5rem;
+    max-width: 640px;
+}
+
+.console-input-row input {
+    flex: 1;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 0.45rem 0.6rem;
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
 .status-table {
     width: 100%;
     border-collapse: collapse;
