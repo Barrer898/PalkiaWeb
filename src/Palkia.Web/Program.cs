@@ -77,6 +77,7 @@ var minecraftOptions = new MinecraftOptions
 {
     CpuCores = builder.Configuration.GetValue("Minecraft:CpuCores", 2),
     MemoryMb = builder.Configuration.GetValue("Minecraft:MemoryMb", 6144),
+    IdleShutdownMinutes = builder.Configuration.GetValue("Minecraft:IdleShutdownMinutes", 30),
 };
 builder.Services.AddSingleton(minecraftOptions);
 
@@ -88,6 +89,7 @@ var consoleOptions = new MinecraftConsoleOptions
 };
 builder.Services.AddSingleton(consoleOptions);
 builder.Services.AddSingleton<IMinecraftConsoleClient, MinecraftConsoleClient>();
+builder.Services.AddHostedService<MinecraftIdleShutdownService>();
 
 // --- Infra: system metrics ---------------------------------------------------
 // One shared instance: registered as the concrete type so AddHostedService

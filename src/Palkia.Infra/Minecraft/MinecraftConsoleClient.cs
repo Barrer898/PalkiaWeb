@@ -66,8 +66,14 @@ public sealed class MinecraftConsoleClient : IMinecraftConsoleClient
             // Opening a FIFO for writing blocks until some process has it
             // open for reading. If Minecraft isn't actually running, nothing
             // ever will, so without the timeout this would hang forever.
+            //
+            // FileShare.ReadWrite on purpose, not None: .NET emulates None with
+            // an exclusive advisory lock, which would make two simultaneous
+            // senders (say the idle-shutdown check's 'list' and an admin typing
+            // a command) fail each other with "file in use". Nothing needs
+            // exclusive access to a pipe - small writes are atomic.
             await using var pipe = new FileStream(
-                _options.ConsoleFifoPath, FileMode.Open, FileAccess.Write, FileShare.None,
+                _options.ConsoleFifoPath, FileMode.Open, FileAccess.Write, FileShare.ReadWrite,
                 bufferSize: 1, useAsync: true);
 
             var bytes = Encoding.UTF8.GetBytes(command.TrimEnd('\r', '\n') + "\n");

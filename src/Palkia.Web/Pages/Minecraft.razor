@@ -13,6 +13,14 @@
     the <a href="/">dashboard</a> for the shared budget this draws from.
 </p>
 
+@if (MinecraftOptions.IdleShutdownMinutes > 0)
+{
+    <p class="muted">
+        Shuts down on its own after @MinecraftOptions.IdleShutdownMinutes minutes
+        with nobody online, so it doesn't sit on the CPU/RAM for nothing.
+    </p>
+}
+
 <div class="status-line">
     <span class="badge badge-@StateCss()">@StateLabel()</span>
 </div>
@@ -147,6 +155,17 @@ else
     {
         _ = InvokeAsync(async () =>
         {
+            if (_lease is { State: LeaseState.Released })
+            {
+                // The lease was given back without going through this page -
+                // e.g. by the idle auto-shutdown, which stops the service and
+                // releases the lease itself. Drop our stale reference so the
+                // Start button comes back and a later queued lease can start.
+                _lease = null;
+                _serviceStartRequested = false;
+                _rawState = (await ServiceControl.GetStatusAsync(MinecraftService)).State;
+            }
+
             if (_lease is { State: LeaseState.Active } && !_serviceStartRequested)
             {
                 await StartServiceForActiveLeaseAsync();

@@ -9,4 +9,8 @@ public sealed class MinecraftOptions
 {
     public int CpuCores { get; set; } = 2;
     public int MemoryMb { get; set; } = 6144;
+
+    /// <summary>Stop the server after this many minutes with nobody online,
+    /// freeing its lease for other things. 0 disables auto-shutdown.</summary>
+    public int IdleShutdownMinutes { get; set; } = 30;
 }
