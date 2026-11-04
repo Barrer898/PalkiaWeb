@@ -541,6 +541,23 @@ public sealed class AiServingManager : IAiServingManager
 
     // --- helpers ----------------------------------------------------------------
 
+    /// <summary>True while ANY authenticated key has a live or pending permit
+    /// in the ledger - conservative busy signal for idle auto-stop, so a
+    /// server is never shut down out from under an admitted-but-still-queueing
+    /// request. (Was referenced but never defined - build error fix.)</summary>
+    private bool AnyKeyBusy()
+    {
+        foreach (var id in Concurrency.TrackedIdentities())
+        {
+            if (Concurrency.IsBusy(id))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private LeaseRequest BuildLeaseRequest(ModelProfile profile) => new(
         TierSlotId(profile),
         $"{profile.TierLabel}: {profile.ApiName}",

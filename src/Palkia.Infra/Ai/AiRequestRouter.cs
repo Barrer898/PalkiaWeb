@@ -48,11 +48,29 @@ public static class AiRequestRouter
         return string.IsNullOrEmpty(queryString) ? url : $"{url}?{queryString}";
     }
 
+    /// <summary>Item 5: forward the headers OpenAI/Anthropic clients actually
+    /// need. Content-Type is a CONTENT header - it must travel on
+    /// target.Content.Headers.ContentType, not target.Headers (HttpRequest-
+    /// Message refuses restricted headers there and would silently drop it).
+    /// Everything else goes through TryAddWithoutValidation so an unknown
+    /// client extension header can't throw.</summary>
     public static void CopyRequestHeaders(HttpRequest request, HttpRequestMessage target)
     {
         foreach (var header in request.Headers)
         {
-            if (Array.IndexOf(AllowedForwardHeaders, header.Key.ToLowerInvariant()) >= 0)
+            var name = header.Key.ToLowerInvariant();
+
+            if (name == "content-type")
+            {
+                if (target.Content is not null &&
+                    System.Net.Http.Headers.MediaTypeHeaderValue.TryParse(header.Value.ToString(), out var mediaType))
+                {
+                    target.Content.Headers.ContentType = mediaType;
+                }
+                continue;
+            }
+
+            if (Array.IndexOf(AllowedForwardHeaders, name) >= 0)
             {
                 target.Headers.TryAddWithoutValidation(header.Key, header.Value.ToArray());
             }
@@ -71,18 +89,36 @@ public static class AiRequestRouter
     /// (SSE / chunked JSON-lines) are piped through byte-for-byte without
     /// buffering - the whole point of not re-parsing them. Non-stream ones
     /// are capped against a ceiling so a runaway completion can't exhaust
-    /// the app's memory.</summary>
+    /// the app's memory. Item 5: preserve the headers OpenAI/Anthropic
+    /// clients read back - Content-Type (text/event-stream keeps SSE alive),
+    /// Retry-After (rate-limit/error semantics), and ft's own x-request-id /
+    /// rate-limit extension headers.</summary>
     public static async Task CopyResponseAsync(HttpResponseMessage upstream, HttpContext http, CancellationToken ct)
     {
         http.Response.StatusCode = (int)upstream.StatusCode;
-        http.Response.ContentType = upstream.Content.Headers.ContentType?.ToString() ?? "application/json";
 
-        if (upstream.Headers.TryGetValue("retry-after", out var retryAfter))
+        foreach (var header in upstream.Headers)
         {
-            http.Response.Headers["Retry-After"] = retryAfter.ToArray();
+            var name = header.Key.ToLowerInvariant();
+            if (name is "retry-after" or "x-request-id" or "x-ratelimit-limit-requests"
+                or "x-ratelimit-remaining-requests" or "x-ratelimit-limit-tokens"
+                or "x-ratelimit-remaining-tokens")
+            {
+                http.Response.Headers[header.Key] = header.Value.ToArray();
+            }
         }
 
+        // Content-Type lives on the CONTENT headers, not the request-style
+        // Headers collection (that was item 5's compile error too).
+        http.Response.ContentType = upstream.Content.Headers.ContentType?.ToString() ?? "application/json";
+
         await using var upstreamStream = await upstream.Content.ReadAsStreamAsync(ct);
+
+        // SSE must reach the client incrementally: flush after every chunk
+        // and tell Kestrel not to wrap it in content-length buffering.
+        var streaming = string.Equals(
+            upstream.Content.Headers.ContentType?.MediaType, "text/event-stream", StringComparison.OrdinalIgnoreCase);
+
         var buffer = System.Buffers.ArrayPool<byte>.Shared.Rent(8192);
         try
         {
@@ -91,11 +127,20 @@ public static class AiRequestRouter
             while ((read = await upstreamStream.ReadAsync(buffer.AsMemory(), ct)) > 0)
             {
                 total += read;
-                if (!IsStreaming(http) && total > MaxBufferedResponseBytes)
+                if (!streaming && total > MaxBufferedResponseBytes)
                 {
                     break;   // defensive ceiling on buffered (non-SSE) payloads
                 }
                 await http.Response.Body.WriteAsync(buffer.AsMemory(0, read), ct);
+                if (streaming)
+                {
+                    await http.Response.Body.FlushAsync(ct);
+                }
+            }
+
+            if (streaming)
+            {
+                await http.Response.Body.FlushAsync(ct);
             }
         }
         finally
@@ -103,9 +148,6 @@ public static class AiRequestRouter
             System.Buffers.ArrayPool<byte>.Shared.Return(buffer);
         }
     }
-
-    private static bool IsStreaming(HttpContext http) =>
-        http.Response.ContentType?.Contains("event-stream", StringComparison.OrdinalIgnoreCase) == true;
 
     public static string OpenAiError(string type, string message) =>
         JsonSerializer.Serialize(new { error = new { type, code = type, message } });

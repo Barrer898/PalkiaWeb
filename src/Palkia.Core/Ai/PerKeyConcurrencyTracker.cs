@@ -50,6 +50,11 @@ public sealed class PerKeyConcurrencyTracker
         }
     }
 
+    /// <summary>Snapshot of identities currently in the ledger. Only used by
+    /// idle maintenance as a conservative "anyone busy?" scan - never exposed
+    /// over HTTP and never logged.</summary>
+    public IReadOnlyList<AiKeyId> TrackedIdentities() => _states.Keys.ToList();
+
     /// <summary>
     /// Atomic check-and-take. Returns null when the policy refuses (caller
     /// must answer 429 + Retry-After), otherwise a release token that hands

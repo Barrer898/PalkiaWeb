@@ -21,6 +21,12 @@ var connectionString = builder.Configuration.GetConnectionString("Default")
 builder.Services.AddDbContext<PalkiaDbContext>(options =>
     options.UseSqlite(connectionString));
 
+// DbAiKeyStore does per-request auth reads off an in-memory snapshot but
+// writes (admin create/revoke) through EF; a factory gives it its own
+// contexts without fighting the scoped DbContext used by Identity.
+builder.Services.AddDbContextFactory<PalkiaDbContext>(options =>
+    options.UseSqlite(connectionString));
+
 builder.Services.AddIdentity<ApplicationUser, IdentityRole>(options =>
     {
         // No self-registration in this app - accounts are created by an
@@ -119,14 +125,31 @@ var freeTokenOptions = new FreeTokenOptions
     LoadTimeoutSeconds = builder.Configuration.GetValue("FreeToken:LoadTimeoutSeconds", 900),
     AlwaysOnProfiles = builder.Configuration.GetSection("FreeToken:AlwaysOnProfiles").Get<List<string>>() ?? new(),
 };
-builder.Services.GetSection("FreeToken:ApiKeys").Bind(freeTokenOptions.ApiKeys);
-builder.Services.GetSection("FreeToken:UpstreamApiKeys").Bind(freeTokenOptions.UpstreamApiKeys);
+// PR review item 1: these bind from Configuration, not Services - the old
+// builder.Services.GetSection(...) didn't even compile.
+builder.Configuration.GetSection("FreeToken:ApiKeys").Bind(freeTokenOptions.ApiKeys);
+builder.Configuration.GetSection("FreeToken:UpstreamApiKeys").Bind(freeTokenOptions.UpstreamApiKeys);
 builder.Services.AddSingleton(freeTokenOptions);
 
-builder.Services.AddSingleton<IFreeTokenClient, FreeTokenClient>();
+// Item 2: FreeTokenClient's constructor takes an HttpClient, so it must be
+// registered through AddHttpClient (the typed-client overload injects a
+// pooled, properly-lifecycled client). Health/stats polls are loopback and
+// tiny; a short timeout keeps a wedged ft instance from hanging the poll
+// loop forever.
+builder.Services.AddHttpClient<IFreeTokenClient, FreeTokenClient>(client =>
+{
+    client.Timeout = TimeSpan.FromSeconds(10);
+});
+
 builder.Services.AddSingleton<AiServingManager>();
 builder.Services.AddSingleton<IAiServingManager>(sp => sp.GetRequiredService<AiServingManager>());
 builder.Services.AddHostedService<AiServingHostedService>();
+
+// Item 7: admin-managed API keys, hashed at rest in SQLite. Registered as a
+// singleton because ApiKeyAuthenticator reads its in-memory snapshot on the
+// request hot path; LoadAsync() below fills that snapshot BEFORE the gateway
+// is mapped (item: initialized before accepting requests).
+builder.Services.AddSingleton<IAiKeyStore, DbAiKeyStore>();
 
 // --- Web framework -----------------------------------------------------------
 
@@ -141,11 +164,10 @@ builder.Services.AddAuthorization(options =>
 var app = builder.Build();
 
 // --- Dev-time DB bring-up + first-run admin seed ----------------------------
-// EnsureCreated() is a deliberate phase-1 shortcut so we don't need the
-// dotnet-ef CLI (not available in the sandbox this was scaffolded in).
-// Before phase 2 introduces schema changes, switch this to real EF Core
-// Migrations (`dotnet ef migrations add InitialCreate`) so upgrades don't
-// require dropping the database.
+// Item 8: real EF Core migrations, not EnsureCreated(). EnsureCreated never
+// upgrades an existing database, so the new AiApiKeys table would simply be
+// missing on every already-installed Palkia. Migrate() applies pending
+// migrations on startup (and creates the DB from scratch on a fresh one).
 using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<PalkiaDbContext>();
@@ -161,11 +183,24 @@ using (var scope = app.Services.CreateScope())
         Directory.CreateDirectory(dbDirectory);
     }
 
-    db.Database.EnsureCreated();
+    db.Database.Migrate();
 
     await SeedAdminAsync(scope.ServiceProvider, app.Configuration, app.Logger);
+
     await ReconcileBrokerAsync(scope.ServiceProvider, app.Logger);
 }
+
+// Item 4: Kestrel enforces the SAME body ceiling as the gateway, at the
+// connection level - a chunked upload that never declares Content-Length
+// gets aborted by the server itself once it crosses the limit, instead of
+// being buffered indefinitely before any handler ever sees it.
+builder.WebHost.ConfigureKestrel(kestrel =>
+    kestrel.Limits.MaxRequestBodySize = AiGatewayEndpoints.MaxRequestBodyBytes);
+
+// Item 1/7: fill the hashed-key auth snapshot BEFORE the gateway can accept
+// a single request - this runs after the migration block above (the table
+// must exist) and long before app.Run() below starts listening.
+await app.Services.GetRequiredService<DbAiKeyStore>().LoadAsync();
 
 if (!app.Environment.IsDevelopment())
 {
