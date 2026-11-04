@@ -1,7 +1,9 @@
 :root {
-    --bg: #0f1115;
-    --panel: #171a21;
-    --border: #2a2e38;
+    --bg: #050b1a;
+    /* Panels are translucent "glass" so the XMB background (xmb-bg.js)
+       shows through. Inputs, the sidebar and the login card all use these. */
+    --panel: rgba(10, 18, 40, 0.55);
+    --border: rgba(255, 255, 255, 0.12);
     --text: #e6e8eb;
     --muted: #9aa1ac;
     --accent: #4f8cff;
@@ -12,9 +14,19 @@
 
 * { box-sizing: border-box; }
 
+html { background: var(--bg); }
+
+/* Injected by xmb-bg.js; sits behind all content. */
+#xmb-bg {
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+}
+
 body {
     margin: 0;
-    background: var(--bg);
+    background: transparent;
     color: var(--text);
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
@@ -32,6 +44,8 @@ a { color: var(--accent); }
     background: var(--panel);
     border-right: 1px solid var(--border);
     padding: 1rem;
+    -webkit-backdrop-filter: blur(10px);
+    backdrop-filter: blur(10px);
 }
 
 .nav-brand {
@@ -49,7 +63,7 @@ a { color: var(--accent); }
     margin-bottom: 0.15rem;
 }
 
-.nav-sidebar nav a:hover { background: #1f232c; }
+.nav-sidebar nav a:hover { background: rgba(255, 255, 255, 0.08); }
 .nav-sidebar nav a.active { background: var(--accent); color: #fff; }
 
 .nav-section {
@@ -68,6 +82,9 @@ a { color: var(--accent); }
     align-items: center;
     padding: 0.75rem 1.5rem;
     border-bottom: 1px solid var(--border);
+    background: rgba(5, 11, 26, 0.25);
+    -webkit-backdrop-filter: blur(10px);
+    backdrop-filter: blur(10px);
 }
 
 .app-title { font-weight: 600; }
@@ -101,7 +118,7 @@ a { color: var(--accent); }
 .status-line { margin: 0.75rem 0; }
 
 .console-log {
-    background: #05070a;
+    background: rgba(2, 5, 12, 0.72);
     border: 1px solid var(--border);
     border-radius: 6px;
     padding: 0.75rem;
@@ -160,7 +177,7 @@ a { color: var(--accent); }
 .badge-neutral { background: rgba(154, 161, 172, 0.15); color: var(--muted); }
 
 .output-box {
-    background: #0b0d11;
+    background: rgba(2, 5, 12, 0.6);
     border: 1px solid var(--border);
     border-radius: 6px;
     padding: 0.6rem;
@@ -197,6 +214,8 @@ a { color: var(--accent); }
     border-radius: 10px;
     padding: 2rem;
     width: 320px;
+    -webkit-backdrop-filter: blur(14px);
+    backdrop-filter: blur(14px);
 }
 
 .auth-card h1 { margin-top: 0; }
