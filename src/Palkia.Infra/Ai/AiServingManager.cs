@@ -313,7 +313,14 @@ public sealed class AiServingManager : IAiServingManager
 
     public string UpstreamUrlFor(ModelProfile profile) => BuildReadyMarker(profile).ReasonPhrase!;
 
-    private HttpResponseMessage BuildReadyMarker(ModelProfile profile)
+    public string UpstreamApiKeyFor(ModelProfile profile) => profile.UpstreamApiKey;
+
+    /// <summary>internal, not public: the catalog is the trust boundary and
+    /// callers must go through StartProfileAsync/StopProfileAsync/acquire-
+    /// release paths that keep lease bookkeeping honest. The website chat
+    /// service (Palkia.Web) uses this to reach ft exactly the way the HTTP
+    /// gateway does - same admission, same loopback bind, no side door.</summary>
+    internal HttpResponseMessage BuildReadyMarker(ModelProfile profile)
     {
         // The endpoint performs the real forwarded call itself (it owns the
         // inbound request body stream); this marker just carries the upstream

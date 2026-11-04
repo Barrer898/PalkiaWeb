@@ -14,13 +14,30 @@ namespace Palkia.Infra.Ai;
 /// </summary>
 public static class ApiKeyAuthenticator
 {
-    public static AuthResult Authenticate(FreeTokenOptions options, HttpRequest request)
+    public static AuthResult Authenticate(FreeTokenOptions options, HttpRequest request) =>
+        Authenticate(options, null, request);
+
+    /// <summary>Same as above, but also consults the admin-managed key store
+    /// (hashed-at-rest, managed on the AI page - admins can create/revoke
+    /// keys without touching appsettings or restarting the box). Config keys
+    /// still work so headless agent setups survive a Palkia restart; when a
+    /// key exists in both places the store wins. The store is injected via
+    /// parameter rather than service-located because this runs inside
+    /// minimal-API handlers with only the request's provider available.</summary>
+    public static AuthResult Authenticate(FreeTokenOptions options, IAiKeyStore? store, HttpRequest request)
     {
         var provided = ExtractKey(request);
         if (provided is null)
         {
             return new AuthResult(null, Error("authentication_error",
                 "Missing API key. Send 'Authorization: Bearer <key>' or 'x-api-key: <key>'."), 401);
+        }
+
+        if (store is not null && store.TryMatch(provided, out var stored) && stored is not null)
+        {
+            return new AuthResult(new AiCaller(
+                string.IsNullOrWhiteSpace(stored.Label) ? "unnamed-key" : stored.Label,
+                stored.AllowedProfiles), null, 0);
         }
 
         foreach (var entry in options.ApiKeys)

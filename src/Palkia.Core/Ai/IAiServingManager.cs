@@ -85,6 +85,12 @@ public interface IAiServingManager
     /// it performs the actual forwarded call itself.</summary>
     string UpstreamUrlFor(ModelProfile profile);
 
+    /// <summary>The loopback shared secret (ft's own --api-key) for a profile,
+    /// if one is configured. Callers that talk to ft directly (the website
+    /// chat service) must present it; client-facing keys never travel
+    /// upstream. Empty when no key is set.</summary>
+    string UpstreamApiKeyFor(ModelProfile profile);
+
     event Action? StateChanged;
 }
 

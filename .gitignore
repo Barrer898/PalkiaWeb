@@ -1,13 +1,20 @@
 bin/
 obj/
-*.user
+packages/
+.nuget/
 .vs/
-.vscode/
-
-# Local SQLite databases - never commit real data or the seeded schema
-*.db
-*.db-shm
-*.db-wal
-
-# dotnet user-secrets live outside the repo already, but just in case
-secrets.json
+*.user
+*.suo
+*.dbmdl
+*.jfm
+*.pfx
+*.publishsettings
+*.log
+*.tmp
+*.swp
+*.swo
+.env
+.env.local
+*.env.*
+.DS_Store
+Thumbs.db

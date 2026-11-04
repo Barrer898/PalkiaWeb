@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.DependencyInjection;
 using Palkia.Core.Ai;
 
 namespace Palkia.Infra.Ai;
@@ -54,7 +55,7 @@ public static class AiGatewayEndpoints
 
     private static IResult HandleModelsAsync(HttpRequest request, IAiServingManager manager, FreeTokenOptions options)
     {
-        var auth = ApiKeyAuthenticator.Authenticate(options, request);
+        var auth = ApiKeyAuthenticator.Authenticate(options, KeyStore(request), request);
         if (!auth.Succeeded)
         {
             return Result(auth.ErrorBody!, auth.StatusCode);
@@ -75,7 +76,7 @@ public static class AiGatewayEndpoints
 
     private static IResult HandleStatsAsync(HttpRequest request, IAiServingManager manager, FreeTokenOptions options)
     {
-        var auth = ApiKeyAuthenticator.Authenticate(options, request);
+        var auth = ApiKeyAuthenticator.Authenticate(options, KeyStore(request), request);
         if (!auth.Succeeded)
         {
             return Result(auth.ErrorBody!, auth.StatusCode);
@@ -109,7 +110,7 @@ public static class AiGatewayEndpoints
         var logger = http.RequestServices.GetRequiredService<ILoggerFactory>().CreateLogger("AiGateway");
         var ct = http.RequestAborted;
 
-        var auth = ApiKeyAuthenticator.Authenticate(options, http.Request);
+        var auth = ApiKeyAuthenticator.Authenticate(options, http.RequestServices.GetService<IAiKeyStore>(), http.Request);
         if (!auth.Succeeded)
         {
             return Result(auth.ErrorBody!, auth.StatusCode);
@@ -215,6 +216,12 @@ public static class AiGatewayEndpoints
     });
 
     private static HttpClient GatewayHttp => _gatewayHttp.Value;
+
+    /// <summary>Admin-managed keys are optional (the box runs fine on config
+    /// keys alone), so resolve defensively rather than requiring the
+    /// registration.</summary>
+    private static IAiKeyStore? KeyStore(HttpRequest request) =>
+        request.HttpContext.RequestServices.GetService<IAiKeyStore>();
 
     private static IResult Result(string jsonBody, int statusCode) =>
         Results.Text(jsonBody, "application/json", status: statusCode);
