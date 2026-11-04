@@ -35,6 +35,54 @@ public sealed record ProfileRuntimeState(
 public sealed record SlotLease(bool Granted, bool Queued, string ProfileId, string Message);
 
 /// <summary>
+/// Admission outcome for one gateway request. Exactly one path: either
+/// <see cref="Profile"/> names a Ready profile to forward to (and the caller
+/// MUST dispose this object when the proxied response has fully left the
+/// wire - streaming included), or <see cref="ErrorBody"/> carries an
+/// OpenAI-shaped error with the right status code. Disposing is idempotent
+/// and also wired to ResponseCompleted/RequestAborted by the endpoint, so a
+/// client disconnect mid-stream can't leak the per-key permit.
+/// </summary>
+public sealed class AiAdmission : IDisposable
+{
+    public ModelProfile? Profile { get; }
+    public string? ErrorBody { get; }
+    public int StatusCode { get; }
+
+    /// <summary>Seconds for the Retry-After header on 429 refusals.</summary>
+    public int RetryAfterSeconds { get; }
+
+    private readonly IDisposable? _permit;
+    private int _disposed;
+
+    private AiAdmission(ModelProfile? profile, string? errorBody, int statusCode, int retryAfter, IDisposable? permit)
+    {
+        Profile = profile;
+        ErrorBody = errorBody;
+        StatusCode = statusCode;
+        RetryAfterSeconds = retryAfter;
+        _permit = permit;
+    }
+
+    public static AiAdmission Denied(string errorBody, int statusCode, string profileIdHint = "") =>
+        new(null, errorBody, statusCode, 0, null);
+
+    public static AiAdmission RateLimited(string errorBody, int retryAfterSeconds) =>
+        new(null, errorBody, 429, retryAfterSeconds, null);
+
+    public static AiAdmission Ready(ModelProfile profile, IDisposable permit) =>
+        new(profile, null, 0, 0, permit);
+
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) == 0)
+        {
+            _permit?.Dispose();
+        }
+    }
+}
+
+/// <summary>
 /// The AI serving module: lifecycle of the per-profile `ft serve` instances
 /// plus the OpenAI-compatible gateway every client (the website chat and
 /// external coding agents alike) goes through.
@@ -68,21 +116,16 @@ public interface IAiServingManager
     /// <summary>Stop the ft server and release its tier lease.</summary>
     Task StopProfileAsync(ModelProfile profile, CancellationToken ct = default);
 
-    /// <summary>Gateway admission: resolves the requested model to a profile,
-    /// enforces per-key concurrency, starts the server if needed (waiting up
-    /// to <paramref name="maxWaitMs"/> for a cold load), and records activity
-    /// for idle shutdown. Callers get either a streamable upstream response
-    /// or a synthetic error response carrying the right status code.</summary>
-    Task<AiGatewayResult> AcquireSlotAsync(string apiKeyLabel, string requestedModel, int maxWaitMs, CancellationToken ct = default);
+    /// <summary>Gateway admission, in the order PR review item 3 demands:
+    /// resolve the model, check the key's AllowedProfiles, take the per-key
+    /// concurrency permit, and ONLY THEN touch leases/start servers/queue.
+    /// An unauthorized or over-limit key can never trigger a model startup,
+    /// consume a broker queue position or hold resources.</summary>
+    Task<AiAdmission> AdmitRequestAsync(AiCaller caller, string? requestedModel, int maxWaitMs, CancellationToken ct = default);
 
-    /// <summary>Called by the gateway when a proxied call finishes, so the
-    /// per-key semaphore is handed back exactly once.</summary>
-    void ReleaseSlot(string apiKeyLabel, string profileId);
-
-    /// <summary>Base URL ("http://127.0.0.1:&lt;port&gt;") of the ft instance a
-    /// granted slot refers to. Carried on <see cref="AiGatewayResult.Upstream"/>
-    /// via ReasonPhrase - the endpoint owns the inbound request body stream, so
-    /// it performs the actual forwarded call itself.</summary>
+    /// <summary>Base URL ("http://127.0.0.1:&lt;port&gt;") of a profile's ft
+    /// instance on loopback. The gateway endpoint owns the inbound request
+    /// body stream, so it performs the actual forwarded call itself.</summary>
     string UpstreamUrlFor(ModelProfile profile);
 
     /// <summary>The loopback shared secret (ft's own --api-key) for a profile,
@@ -92,44 +135,6 @@ public interface IAiServingManager
     string UpstreamApiKeyFor(ModelProfile profile);
 
     event Action? StateChanged;
-}
-
-/// <summary>The gateway's answer to one proxied call: either a ready marker
-/// carrying the upstream base URL (see <see cref="IAiServingManager.UpstreamUrlFor"/>)
-/// or a synthetic OpenAI-shaped error body with the right status code. Exactly
-/// one of the two is set; Dispose releases the per-key concurrency slot.</summary>
-public sealed class AiGatewayResult : IDisposable
-{
-    public HttpResponseMessage? Upstream { get; }
-    public string? ErrorBody { get; }
-    public int StatusCode { get; }
-    public string ProfileId { get; }
-
-    private readonly Action? _release;
-    private int _released;
-
-    private AiGatewayResult(HttpResponseMessage? upstream, string? errorBody, int statusCode, string profileId, Action? release)
-    {
-        Upstream = upstream;
-        ErrorBody = errorBody;
-        StatusCode = statusCode;
-        ProfileId = profileId;
-        _release = release;
-    }
-
-    public static AiGatewayResult Ok(HttpResponseMessage upstream, string profileId, Action releaseSlot) =>
-        new(upstream, null, (int)upstream.StatusCode, profileId, releaseSlot);
-
-    public static AiGatewayResult Error(string errorBody, int statusCode, string profileId) =>
-        new(null, errorBody, statusCode, profileId, null);
-
-    public void Dispose()
-    {
-        if (Interlocked.Exchange(ref _released, 1) == 0)
-        {
-            _release?.Invoke();
-        }
-    }
 }
 
 /// <summary>Minimal surface Palkia needs from a running ft instance. Matches

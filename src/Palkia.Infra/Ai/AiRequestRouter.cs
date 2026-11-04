@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Microsoft.AspNetCore.Http;
 using Palkia.Core.Ai;
 
 namespace Palkia.Infra.Ai;

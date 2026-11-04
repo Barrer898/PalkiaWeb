@@ -22,10 +22,14 @@ namespace Palkia.Infra.Ai;
 ///  - requests that don't fit right now queue FIFO instead of collapsing the
 ///    box (§6: "add a queue rather than allowing bursts").
 ///
-/// A second layer sits on top: per-API-key in-flight semaphores, because a
-/// FreeToken server-wide --max-running-requests is explicitly NOT a per-user
-/// concurrency policy (§6). Over-limit requests get 429+Retry-After from the
-/// gateway rather than piling onto the machine's own queue indefinitely.
+/// A second layer sits on top: the per-API-key concurrency ledger
+/// (<see cref="PerKeyConcurrencyTracker"/> +
+/// <see cref="PerKeyConcurrencyPolicy"/>), because a FreeToken server-wide
+/// --max-running-requests is explicitly NOT a per-user concurrency policy
+/// (§6). Over-limit requests get 429+Retry-After from the gateway rather than
+/// piling onto the machine's own queue indefinitely. Admission order follows
+/// PR review item 3: model resolution -> profile authorization -> per-key
+/// permit -> ONLY THEN lease/start/queue.
 /// </summary>
 public sealed class AiServingManager : IAiServingManager
 {
@@ -37,20 +41,31 @@ public sealed class AiServingManager : IAiServingManager
 
     private readonly SemaphoreSlim _lifecycleLock = new(1, 1);
     private readonly ConcurrentDictionary<string, ProfileSession> _sessions = new();
-    private readonly ConcurrentDictionary<(string Key, string Profile), InflightCounter> _perKeyInflight = new();
+
+    /// <summary>The per-key concurrency ledger (rules §6 as restated in the
+    /// PR review): one active request per key across profiles; the single
+    /// exception is one Small + one Fast simultaneously.</summary>
+    public PerKeyConcurrencyTracker Concurrency { get; } = new();
+
+    /// <summary>Injected seam for tests: lets a unit test make every health
+    /// poll answer without an HTTP stack. Production passes null and gets
+    /// the real loopback client.</summary>
+    private readonly Func<ModelProfile, CancellationToken, Task<bool>> _readyProbe;
 
     public AiServingManager(
         IResourceBroker broker,
         IServiceControlClient serviceControl,
         IFreeTokenClient ft,
         FreeTokenOptions options,
-        ILogger<AiServingManager> logger)
+        ILogger<AiServingManager> logger,
+        Func<ModelProfile, CancellationToken, Task<bool>>? readyProbeOverride = null)
     {
         _broker = broker;
         _serviceControl = serviceControl;
         _ft = ft;
         _options = options;
         _logger = logger;
+        _readyProbe = readyProbeOverride ?? DefaultReadyProbeAsync;
 
         // The catalog is the trust boundary for WHICH profiles exist; the
         // loopback shared secrets (ft's own --api-key) come from config so
@@ -66,6 +81,12 @@ public sealed class AiServingManager : IAiServingManager
         }
 
         _broker.StateChanged += OnBrokerStateChanged;
+    }
+
+    private async Task<bool> DefaultReadyProbeAsync(ModelProfile profile, CancellationToken ct)
+    {
+        var health = await _ft.GetHealthAsync(profile, ct);
+        return health.Status == "ok";
     }
 
     public IReadOnlyList<ModelProfile> Profiles => ModelProfileCatalog.All;
@@ -84,15 +105,6 @@ public sealed class AiServingManager : IAiServingManager
         public string? HealthDetail;
         public DateTimeOffset LastUsedUtc = DateTimeOffset.UtcNow;
         public IReadOnlyDictionary<string, string>? Stats;
-    }
-
-    /// <summary>Per-(key,profile) in-flight count with an admission deadline,
-    /// so queued-but-not-yet-admitted requests still count as busy and the
-    /// idle timer can't stop a server out from under them.</summary>
-    private sealed class InflightCounter
-    {
-        public int Count;
-        public DateTimeOffset AdmissionDeadlineUtc;
     }
 
     public ProfileRuntimeState GetState(ModelProfile profile)
@@ -197,47 +209,49 @@ public sealed class AiServingManager : IAiServingManager
 
     // --- Gateway admission -----------------------------------------------------
 
-    public async Task<AiGatewayResult> AcquireSlotAsync(string apiKeyLabel, string requestedModel, int maxWaitMs, CancellationToken ct = default)
+    public async Task<AiAdmission> AdmitRequestAsync(AiCaller caller, string? requestedModel, int maxWaitMs, CancellationToken ct = default)
     {
+        // STEP 1 - resolve the model. No side effects yet.
         var profile = AiRequestRouter.ResolveProfile(requestedModel);
         if (profile is null)
         {
-            return AiGatewayResult.Error(
+            return AiAdmission.Denied(
                 AiRequestRouter.OpenAiError("model_not_found",
                     $"'{requestedModel}' is not a profile on this Palkia box. See GET /api/llm/v1/models."),
-                404, requestedModel);
+                404);
         }
 
-        var counter = _perKeyInflight.GetOrAdd((apiKeyLabel, profile.Id), _ => new InflightCounter());
-
-        // Per-key concurrency (rules §6): refuse fast rather than let one
-        // client pile an unbounded personal backlog onto the machine. The
-        // deadline keeps the idle timer honest while we wait below.
-        lock (counter)
+        // STEP 2 - profile authorization (PR review item 3). A key that may
+        // not use this profile must never reach the lease machinery below:
+        // no startup, no queue position, no permit churn.
+        if (!caller.Allows(profile))
         {
-            if (counter.Count >= profile.MaxConcurrentRequests)
-            {
-                return AiGatewayResult.Error(
-                    AiRequestRouter.OpenAiError("rate_limited",
-                        $"Too many concurrent requests for '{profile.ApiName}' on this key (limit {profile.MaxConcurrentRequests})."),
-                    429, profile.Id);
-            }
-            counter.Count++;
-            counter.AdmissionDeadlineUtc = DateTimeOffset.UtcNow.AddMilliseconds(maxWaitMs);
+            return AiAdmission.Denied(
+                AiRequestRouter.OpenAiError("permission_error",
+                    $"This API key may not use profile '{profile.Id}'."),
+                403);
         }
 
-        var released = 0;
-        void ReleaseSlot()
+        // STEP 3 - per-key concurrency, keyed by stable identity, checked
+        // atomically against the whole-policy (one large seat; one Small; one
+        // Fast). Refusal is immediate 429 - before any lease work too.
+        var permit = Concurrency.TryAcquireForAdmission(caller.Id, profile.Tier);
+        if (permit is null)
         {
-            if (Interlocked.Exchange(ref released, 1) == 0)
-            {
-                lock (counter)
-                {
-                    counter.Count--;
-                }
-            }
+            var activeTiers = Concurrency.ActiveTiers(caller.Id);
+            var blocking = Math.Max(1, PerKeyConcurrencyPolicy.BlockingCount(profile.Tier, activeTiers));
+            var retryAfter = Math.Clamp(blocking * 5, 5, 120);
+
+            return AiAdmission.RateLimited(
+                AiRequestRouter.OpenAiError("rate_limited",
+                    $"This API key already has {activeTiers.Count} request(s) in flight " +
+                    $"(policy: one at a time; one Small + one Fast may overlap). Retry '{profile.ApiName}' later."),
+                retryAfter);
         }
 
+        // From here on, every exit path either hands the permit to the caller
+        // (AiAdmission.Ready disposes it when the response finishes leaving
+        // the wire) or disposes it right here.
         try
         {
             var session = _sessions.GetOrAdd(profile.Id, _ => new ProfileSession { Profile = profile });
@@ -248,9 +262,9 @@ public sealed class AiServingManager : IAiServingManager
                 var start = await StartProfileAsync(profile, ct);
                 if (!start.Granted && !start.Queued)
                 {
-                    ReleaseSlot();
-                    return AiGatewayResult.Error(
-                        AiRequestRouter.OpenAiError("admission_denied", start.Message), 409, profile.Id);
+                    permit.Dispose();
+                    return AiAdmission.Denied(
+                        AiRequestRouter.OpenAiError("admission_denied", start.Message), 409);
                 }
             }
 
@@ -265,10 +279,10 @@ public sealed class AiServingManager : IAiServingManager
 
                 if (session.State == ProfileRunState.Failed)
                 {
-                    ReleaseSlot();
-                    return AiGatewayResult.Error(
+                    permit.Dispose();
+                    return AiAdmission.Denied(
                         AiRequestRouter.OpenAiError("upstream_error", session.HealthDetail ?? "profile failed to start"),
-                        502, profile.Id);
+                        502);
                 }
 
                 if (session.Lease is { State: LeaseState.Active })
@@ -280,7 +294,7 @@ public sealed class AiServingManager : IAiServingManager
                     {
                         session.State = ProfileRunState.Ready;
                         RaiseStateChanged();
-                        return AiGatewayResult.Ok(BuildReadyMarker(profile), profile.Id, ReleaseSlot);
+                        return AiAdmission.Ready(profile, permit);
                     }
 
                     session.State = health.Reachable ? ProfileRunState.Loading : ProfileRunState.Starting;
@@ -290,46 +304,28 @@ public sealed class AiServingManager : IAiServingManager
                 await Task.Delay(TimeSpan.FromSeconds(2), ct);
             }
 
-            ReleaseSlot();
-            return AiGatewayResult.Error(
+            permit.Dispose();
+            return AiAdmission.Denied(
                 AiRequestRouter.OpenAiError("not_ready",
                     $"'{profile.ApiName}' is still waiting for resources or loading weights " +
                     "(see the Palkia AI page for queue position and load progress). Retry later."),
-                503, profile.Id);
+                503);
         }
         catch (OperationCanceledException)
         {
-            ReleaseSlot();
+            permit.Dispose();
+            throw;
+        }
+        catch
+        {
+            permit.Dispose();
             throw;
         }
     }
 
-    public void ReleaseSlot(string apiKeyLabel, string profileId)
-    {
-        // No-op by design: release travels inside the AiGatewayResult's
-        // IDisposable so a dropped response can't leak a permit. Kept on the
-        // interface for callers managing slots themselves.
-    }
-
-    public string UpstreamUrlFor(ModelProfile profile) => BuildReadyMarker(profile).ReasonPhrase!;
+    public string UpstreamUrlFor(ModelProfile profile) => $"http://{_options.BindHost}:{profile.Port}";
 
     public string UpstreamApiKeyFor(ModelProfile profile) => profile.UpstreamApiKey;
-
-    /// <summary>internal, not public: the catalog is the trust boundary and
-    /// callers must go through StartProfileAsync/StopProfileAsync/acquire-
-    /// release paths that keep lease bookkeeping honest. The website chat
-    /// service (Palkia.Web) uses this to reach ft exactly the way the HTTP
-    /// gateway does - same admission, same loopback bind, no side door.</summary>
-    internal HttpResponseMessage BuildReadyMarker(ModelProfile profile)
-    {
-        // The endpoint performs the real forwarded call itself (it owns the
-        // inbound request body stream); this marker just carries the upstream
-        // base URL to it via ReasonPhrase.
-        return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
-        {
-            ReasonPhrase = $"http://{_options.BindHost}:{profile.Port}",
-        };
-    }
 
     // --- Broker integration ----------------------------------------------------
 
@@ -486,13 +482,12 @@ public sealed class AiServingManager : IAiServingManager
                 }
 
                 // Never stop a profile with traffic in flight or pending
-                // admission - count every key's live requests against it.
-                var inflight = _perKeyInflight
-                    .Where(kv => kv.Key.Profile == session.Profile.Id)
-                    .Select(kv => kv.Value)
-                    .Count(c => { lock (c) { return c.Count > 0 || c.AdmissionDeadlineUtc > DateTimeOffset.UtcNow; } });
-
-                if (inflight > 0 || DateTimeOffset.UtcNow - session.LastUsedUtc < idle)
+                // admission: the per-key ledger is authoritative - any live
+                // permit (active request, or admitted-but-still-queueing)
+                // keeps its profile busy. The tracker doesn't record WHICH
+                // profile, so "any key busy at all" is the conservative test;
+                // LastUsedUtc still gates the actual idle decision below.
+                if (AnyKeyBusy() || DateTimeOffset.UtcNow - session.LastUsedUtc < idle)
                 {
                     continue;
                 }

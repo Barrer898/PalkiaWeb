@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using Microsoft.AspNetCore.Http;
 using Palkia.Core.Ai;
 
 namespace Palkia.Infra.Ai;
@@ -37,7 +38,8 @@ public static class ApiKeyAuthenticator
         {
             return new AuthResult(new AiCaller(
                 string.IsNullOrWhiteSpace(stored.Label) ? "unnamed-key" : stored.Label,
-                stored.AllowedProfiles), null, 0);
+                stored.AllowedProfiles,
+                provided), null, 0);
         }
 
         foreach (var entry in options.ApiKeys)
@@ -51,7 +53,8 @@ public static class ApiKeyAuthenticator
             {
                 return new AuthResult(new AiCaller(
                     string.IsNullOrWhiteSpace(entry.Label) ? "unnamed-key" : entry.Label,
-                    entry.AllowedProfiles), null, 0);
+                    entry.AllowedProfiles,
+                    provided), null, 0);
             }
         }
 
@@ -60,6 +63,9 @@ public static class ApiKeyAuthenticator
 
     private static string? ExtractKey(HttpRequest request)
     {
+        // Header-only by policy (PR review item 6): a key in a URL would land
+        // in access logs, proxy logs and browser history. Anthropic-style
+        // clients send x-api-key; OpenAI-style clients send Authorization.
         if (request.Headers.TryGetValue("x-api-key", out var header) && !StringValuesAreBlank(header))
         {
             return header.ToString().Trim();
@@ -70,12 +76,6 @@ public static class ApiKeyAuthenticator
         {
             var token = auth["Bearer ".Length..].Trim();
             return token.Length > 0 ? token : null;
-        }
-
-        // Also accept ?api_key= - some lightweight clients can't set headers.
-        if (request.Query.TryGetValue("api_key", out var query) && !StringValuesAreBlank(query))
-        {
-            return query.ToString().Trim();
         }
 
         return null;
