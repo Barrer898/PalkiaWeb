@@ -1,10 +1,12 @@
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
+using Palkia.Core.Ai;
 using Palkia.Core.Broker;
 using Palkia.Core.Metrics;
 using Palkia.Core.Minecraft;
 using Palkia.Core.Services;
 using Palkia.Data;
+using Palkia.Infra.Ai;
 using Palkia.Infra.Metrics;
 using Palkia.Infra.Minecraft;
 using Palkia.Infra.OpenRc;
@@ -99,6 +101,33 @@ builder.Services.AddSingleton<LinuxSystemMetricsSampler>();
 builder.Services.AddSingleton<ISystemMetricsProvider>(sp => sp.GetRequiredService<LinuxSystemMetricsSampler>());
 builder.Services.AddHostedService(sp => sp.GetRequiredService<LinuxSystemMetricsSampler>());
 
+// --- Infra: AI serving (FreeToken) -------------------------------------------
+// Five-profile lineup driven through the same broker as Minecraft: leases are
+// taken on per-TIER slot ids so "never two large models at once" and "Small +
+// Fast may coexist" fall out of the budget arithmetic instead of special
+// cases. The gateway (/api/llm/v1/*) is the ONLY path to ft - it binds to
+// loopback and Palkia adds the per-key auth/concurrency layer (§6/§8). The
+// network-level privacy boundary is Tailscale Serve, not nginx - see
+// deploy/TAILSCALE.md.
+
+var freeTokenOptions = new FreeTokenOptions
+{
+    ProfileConfigDir = builder.Configuration["FreeToken:ProfileConfigDir"] ?? "/etc/palkia/freetoken",
+    ModelsDir = builder.Configuration["FreeToken:ModelsDir"] ?? "/var/lib/palkia-models",
+    BindHost = builder.Configuration["FreeToken:BindHost"] ?? "127.0.0.1",
+    IdleShutdownMinutes = builder.Configuration.GetValue("FreeToken:IdleShutdownMinutes", 15),
+    LoadTimeoutSeconds = builder.Configuration.GetValue("FreeToken:LoadTimeoutSeconds", 900),
+    AlwaysOnProfiles = builder.Configuration.GetSection("FreeToken:AlwaysOnProfiles").Get<List<string>>() ?? new(),
+};
+builder.Services.GetSection("FreeToken:ApiKeys").Bind(freeTokenOptions.ApiKeys);
+builder.Services.GetSection("FreeToken:UpstreamApiKeys").Bind(freeTokenOptions.UpstreamApiKeys);
+builder.Services.AddSingleton(freeTokenOptions);
+
+builder.Services.AddSingleton<IFreeTokenClient, FreeTokenClient>();
+builder.Services.AddSingleton<AiServingManager>();
+builder.Services.AddSingleton<IAiServingManager>(sp => sp.GetRequiredService<AiServingManager>());
+builder.Services.AddHostedService<AiServingHostedService>();
+
 // --- Web framework -----------------------------------------------------------
 
 builder.Services.AddRazorPages();
@@ -150,6 +179,14 @@ app.UseRouting();
 app.UseAuthentication();
 app.UseAuthorization();
 
+// The LLM gateway is authenticated by its OWN API-key layer (per-agent
+// credentials, deployment rules §8), not by the Identity cookie - coding
+// agents don't do interactive logins. Reachability is bounded one level down
+// instead: Palkia listens on loopback/LAN only and Tailscale Serve is the
+// sole remote entry point (deploy/TAILSCALE.md). Map BEFORE the Blazor
+// fallback so /api/llm/* never falls through to _Host.
+app.MapAiGateway();
+
 app.MapRazorPages();
 app.MapBlazorHub();
 app.MapFallbackToPage("/_Host");
@@ -163,24 +200,26 @@ static async Task ReconcileBrokerAsync(IServiceProvider services, ILogger logger
     var minecraftOptions = services.GetRequiredService<MinecraftOptions>();
 
     var minecraft = ManagedServiceCatalog.Find("minecraft");
-    if (minecraft is null)
+    if (minecraft is not null)
     {
-        return;
+        var status = await serviceControl.GetStatusAsync(minecraft);
+        if (status.State == ServiceRunState.Started)
+        {
+            var amount = new ResourceBudget(minecraftOptions.CpuCores, minecraftOptions.MemoryMb, 0);
+            broker.AdoptExistingLease(new LeaseRequest(minecraft.Id, minecraft.DisplayName, amount));
+
+            logger.LogInformation(
+                "Minecraft was already running at startup - adopted a {CpuCores}-core/{MemoryMb}MB lease " +
+                "for it so the broker's accounting matches reality.",
+                minecraftOptions.CpuCores, minecraftOptions.MemoryMb);
+        }
     }
 
-    var status = await serviceControl.GetStatusAsync(minecraft);
-    if (status.State != ServiceRunState.Started)
-    {
-        return;
-    }
-
-    var amount = new ResourceBudget(minecraftOptions.CpuCores, minecraftOptions.MemoryMb, 0);
-    broker.AdoptExistingLease(new LeaseRequest(minecraft.Id, minecraft.DisplayName, amount));
-
-    logger.LogInformation(
-        "Minecraft was already running at startup - adopted a {CpuCores}-core/{MemoryMb}MB lease " +
-        "for it so the broker's accounting matches reality.",
-        minecraftOptions.CpuCores, minecraftOptions.MemoryMb);
+    // ft servers that survived an app restart get re-adopted the same way -
+    // AiServingManager checks all five profiles against OpenRC and takes over
+    // their tier-slot leases. Idempotent: the hosted service runs it again on
+    // start and skips slots whose session already holds a live lease.
+    await services.GetRequiredService<AiServingManager>().ReconcileAtStartupAsync();
 }
 
 static async Task SeedAdminAsync(IServiceProvider services, IConfiguration config, ILogger logger)

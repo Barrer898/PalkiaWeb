@@ -16,4 +16,11 @@
     <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.11" />
   </ItemGroup>
 
+  <!-- ApiKeyAuthenticator / AiRequestRouter speak HttpRequest/HttpContext;
+       FrameworkReference (not a NuGet package) - provided by the web host's
+       shared framework at run time on Palkia. -->
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
 </Project>

@@ -52,6 +52,19 @@ public sealed class AiServingManager : IAiServingManager
         _options = options;
         _logger = logger;
 
+        // The catalog is the trust boundary for WHICH profiles exist; the
+        // loopback shared secrets (ft's own --api-key) come from config so
+        // they never live in a committed file. The launcher reads the same
+        // keys.env values - if they disagree, requests 401 upstream and the
+        // health poll surfaces it as Failed.
+        foreach (var profile in ModelProfileCatalog.All)
+        {
+            if (options.UpstreamApiKeys.TryGetValue(profile.Id, out var key) && !string.IsNullOrWhiteSpace(key))
+            {
+                profile.UpstreamApiKey = key;
+            }
+        }
+
         _broker.StateChanged += OnBrokerStateChanged;
     }
 
@@ -298,6 +311,8 @@ public sealed class AiServingManager : IAiServingManager
         // interface for callers managing slots themselves.
     }
 
+    public string UpstreamUrlFor(ModelProfile profile) => BuildReadyMarker(profile).ReasonPhrase!;
+
     private HttpResponseMessage BuildReadyMarker(ModelProfile profile)
     {
         // The endpoint performs the real forwarded call itself (it owns the
@@ -471,6 +486,12 @@ public sealed class AiServingManager : IAiServingManager
                     .Count(c => { lock (c) { return c.Count > 0 || c.AdmissionDeadlineUtc > DateTimeOffset.UtcNow; } });
 
                 if (inflight > 0 || DateTimeOffset.UtcNow - session.LastUsedUtc < idle)
+                {
+                    continue;
+                }
+
+                // Always-on profiles stay resident until stopped by hand.
+                if (_options.AlwaysOnProfiles.Any(id => string.Equals(id, session.Profile.Id, StringComparison.OrdinalIgnoreCase)))
                 {
                     continue;
                 }

@@ -131,6 +131,15 @@ public sealed class ModelProfile
     /// allow-list entry.</summary>
     public string RcName => $"palkia-ft-{Id}";
 
+    /// <summary>Shared secret handed to `ft serve --api-key` by the launcher
+    /// (from /etc/palkia/freetoken/keys.env). Defense in depth behind the
+    /// loopback bind: even something already on the box must present it to
+    /// talk to ft directly. The gateway injects this header itself - client
+    /// keys never travel upstream. Empty = no key set on ft. Populated at
+    /// startup from FreeTokenOptions.UpstreamApiKeys, not baked into the
+    /// catalog, so secrets stay out of committed source.</summary>
+    public string UpstreamApiKey { get; set; } = "";
+
     /// <summary>True if this profile is an MoE whose experts need host-RAM
     /// placement decisions (offload/hybrid) rather than plain GPU residency.</summary>
     public bool IsMoE => MoE is MoEPlacement.Offload or MoEPlacement.Hybrid or MoEPlacement.Cpu;

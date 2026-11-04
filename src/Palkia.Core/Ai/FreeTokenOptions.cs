@@ -26,6 +26,13 @@ public sealed class FreeTokenOptions
     /// Loading a 35B MoE from NVMe takes minutes - don't set this too low.</summary>
     public int IdleShutdownMinutes { get; set; } = 15;
 
+    /// <summary>Profiles started at boot and kept resident regardless of the
+    /// idle timer, so the first agent request of the day doesn't eat a cold
+    /// NVMe load. Only tiny profiles belong here on Palkia's budget - e.g.
+    /// ["fast"] or ["small","fast"], which the lease sizes allow to coexist.
+    /// Anything listed must also be enabled in /etc/conf.d/palkia-ft-&lt;id&gt;.</summary>
+    public List<string> AlwaysOnProfiles { get; set; } = new();
+
     /// <summary>How long to wait for /health to answer "ok" after a start
     /// before declaring the start failed. Large MoE loads from NVMe are slow;
     /// this covers the worst case (Max profile).</summary>
@@ -35,6 +42,13 @@ public sealed class FreeTokenOptions
     /// (/api/llm/v1/*). Separate credential per agent/user where practical
     /// (deployment rules §8); admins manage them on the AI page.</summary>
     public List<AiApiKey> ApiKeys { get; set; } = new();
+
+    /// <summary>Per-profile loopback shared secrets (ft's own --api-key), keyed
+    /// by profile id ("medium", "fast", ...). Loaded from the
+    /// FreeToken:UpstreamApiKeys section / FT_UPSTREAM_KEY_* env vars. Must
+    /// match what palkia-ft-launch.sh reads from keys.env - same
+    /// "three places agree by hand" pattern as everything else here.</summary>
+    public Dictionary<string, string> UpstreamApiKeys { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 }
 
 /// <summary>

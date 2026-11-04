@@ -79,13 +79,19 @@ public interface IAiServingManager
     /// per-key semaphore is handed back exactly once.</summary>
     void ReleaseSlot(string apiKeyLabel, string profileId);
 
+    /// <summary>Base URL ("http://127.0.0.1:&lt;port&gt;") of the ft instance a
+    /// granted slot refers to. Carried on <see cref="AiGatewayResult.Upstream"/>
+    /// via ReasonPhrase - the endpoint owns the inbound request body stream, so
+    /// it performs the actual forwarded call itself.</summary>
+    string UpstreamUrlFor(ModelProfile profile);
+
     event Action? StateChanged;
 }
 
-/// <summary>The gateway's answer to one proxied call: either a streamable
-/// upstream response (own it and copy it to the client) or a synthetic
-/// OpenAI-shaped error body with the right status code. Exactly one of the
-/// two is set; Dispose releases the per-key concurrency slot.</summary>
+/// <summary>The gateway's answer to one proxied call: either a ready marker
+/// carrying the upstream base URL (see <see cref="IAiServingManager.UpstreamUrlFor"/>)
+/// or a synthetic OpenAI-shaped error body with the right status code. Exactly
+/// one of the two is set; Dispose releases the per-key concurrency slot.</summary>
 public sealed class AiGatewayResult : IDisposable
 {
     public HttpResponseMessage? Upstream { get; }
