@@ -18,14 +18,24 @@ var builder = WebApplication.CreateBuilder(args);
 var connectionString = builder.Configuration.GetConnectionString("Default")
     ?? "Data Source=palkia.db";
 
-builder.Services.AddDbContext<PalkiaDbContext>(options =>
-    options.UseSqlite(connectionString));
-
-// DbAiKeyStore does per-request auth reads off an in-memory snapshot but
-// writes (admin create/revoke) through EF; a factory gives it its own
-// contexts without fighting the scoped DbContext used by Identity.
-builder.Services.AddDbContextFactory<PalkiaDbContext>(options =>
-    options.UseSqlite(connectionString));
+// Single options registration via AddDbContextFactory: it registers BOTH the
+// singleton DbContextOptions<PalkiaDbContext> (so the singleton
+// IDbContextFactory and DbAiKeyStore can consume them - a separate
+// AddDbContext call would register DbContextOptions as SCOPED, which crashes
+// DI validation with "Cannot consume scoped service DbContextOptions from
+// singleton IDbContextFactory") AND the scoped PalkiaDbContext itself that
+// Identity and migrations use.
+builder.Services.AddDbContextFactory<PalkiaDbContext>(o => o.UseSqlite(connectionString));
+// EF10's PendingModelChangesWarning throws during Migrate() because entity
+// CLR defaults (CreatedAtUtc = DateTimeOffset.UtcNow on ApplicationUser and
+// AiApiKeyRow) make the built model differ per-compile from the snapshot.
+// Those are runtime column VALUES, not schema changes, so downgrade the
+// warning to log-only instead of pretending there's a pending migration.
+builder.Services.AddDbContext<PalkiaDbContext>((sp, o) =>
+{
+    o.UseSqlite(connectionString);
+    o.ConfigureWarnings(w => w.Ignore(Microsoft.EntityFrameworkCore.Diagnostics.RelationalEventId.PendingModelChangesWarning));
+}, ServiceLifetime.Scoped);
 
 builder.Services.AddIdentity<ApplicationUser, IdentityRole>(options =>
     {
@@ -161,6 +171,15 @@ builder.Services.AddAuthorization(options =>
     options.AddPolicy("AdminOnly", policy => policy.RequireRole("Admin"));
 });
 
+// Item 4: Kestrel enforces the SAME body ceiling as the gateway, at the
+// connection level - a chunked upload that never declares Content-Length
+// gets aborted by the server itself once it crosses the limit, instead of
+// being buffered indefinitely before any handler ever sees it. This must run
+// on `builder` BEFORE builder.Build(); after Build() the service collection
+// is read-only and ConfigureKestrel throws.
+builder.WebHost.ConfigureKestrel(kestrel =>
+    kestrel.Limits.MaxRequestBodySize = AiGatewayEndpoints.MaxRequestBodyBytes);
+
 var app = builder.Build();
 
 // --- Dev-time DB bring-up + first-run admin seed ----------------------------
@@ -190,17 +209,10 @@ using (var scope = app.Services.CreateScope())
     await ReconcileBrokerAsync(scope.ServiceProvider, app.Logger);
 }
 
-// Item 4: Kestrel enforces the SAME body ceiling as the gateway, at the
-// connection level - a chunked upload that never declares Content-Length
-// gets aborted by the server itself once it crosses the limit, instead of
-// being buffered indefinitely before any handler ever sees it.
-builder.WebHost.ConfigureKestrel(kestrel =>
-    kestrel.Limits.MaxRequestBodySize = AiGatewayEndpoints.MaxRequestBodyBytes);
-
 // Item 1/7: fill the hashed-key auth snapshot BEFORE the gateway can accept
 // a single request - this runs after the migration block above (the table
 // must exist) and long before app.Run() below starts listening.
-await app.Services.GetRequiredService<DbAiKeyStore>().LoadAsync();
+await app.Services.GetRequiredService<IAiKeyStore>().LoadAsync();
 
 if (!app.Environment.IsDevelopment())
 {

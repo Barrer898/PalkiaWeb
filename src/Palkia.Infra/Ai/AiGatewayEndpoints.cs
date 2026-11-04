@@ -47,14 +47,15 @@ public static class AiGatewayEndpoints
         group.MapGet("/v1/models", HandleModelsAsync);
         group.MapGet("/v1/stats", HandleStatsAsync);
 
-        // OpenAI surface. Returning Task<IResult> from the lambda keeps the
-        // framework writing the result to the response (no ASP0016).
-        group.MapPost("/v1/chat/completions", (HttpContext http) => ProxyAsync(http, "chat/completions"));
-        group.MapPost("/v1/completions", (HttpContext http) => ProxyAsync(http, "completions"));
-        group.MapPost("/v1/embeddings", (HttpContext http) => ProxyAsync(http, "embeddings"));
+        // OpenAI surface. The handler returns IResult so MinimalApis writes it
+        // to the response; we bind with an explicit non-generic Delegate cast
+        // because MapPost(RequestDelegate) would discard the IResult (ASP0016).
+        group.MapPost("/v1/chat/completions", (Delegate)(Func<HttpContext, Task<IResult>>)(http => ProxyAsync(http, "chat/completions")));
+        group.MapPost("/v1/completions", (Delegate)(Func<HttpContext, Task<IResult>>)(http => ProxyAsync(http, "completions")));
+        group.MapPost("/v1/embeddings", (Delegate)(Func<HttpContext, Task<IResult>>)(http => ProxyAsync(http, "embeddings")));
 
         // Anthropic surface (Claude Code et al. point at /v1/messages).
-        group.MapPost("/v1/messages", (HttpContext http) => ProxyAsync(http, "messages"));
+        group.MapPost("/v1/messages", (Delegate)(Func<HttpContext, Task<IResult>>)(http => ProxyAsync(http, "messages")));
     }
 
     private static IResult HandleModelsAsync(HttpRequest request, IAiServingManager manager, FreeTokenOptions options)
