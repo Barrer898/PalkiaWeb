@@ -1,0 +1,186 @@
+@page "/chat"
+@attribute [Authorize]
+@inject IWebsiteChatService ChatService
+@inject IJSRuntime JS
+@inject AuthenticationStateProvider AuthState
+@implements IAsyncDisposable
+
+<h1>AI Chat</h1>
+
+<div class="chat-container">
+    @if (_profiles.Count == 0)
+    {
+        <div class="chat-empty">
+            <p class="muted">No model profiles are configured yet. The chat will become available once the AI gateway is running.</p>
+        </div>
+    }
+    else
+    {
+        <div class="chat-header-row">
+            <label for="model-select">Model:</label>
+            <select id="model-select" @bind="@_selectedProfileId" @bind:event="onchange">
+                @foreach (var p in _profiles)
+                {
+                    <option value="@p.Id">@p.DisplayName</option>
+                }
+            </select>
+        </div>
+
+        <div class="chat-messages" @ref="_messagesDiv">
+            @foreach (var msg in _messages)
+            {
+                <div class="chat-msg chat-msg-@(msg.Role)">
+                    <div class="chat-msg-role">
+                        @if (msg.Role == "user")
+                        {
+                            <span class="badge badge-neutral">You</span>
+                        }
+                        else
+                        {
+                            <span class="badge badge-ok">@msg._profileId</span>
+                        }
+                    </div>
+                    <div class="chat-msg-content" id="msg-@(_messages.IndexOf(msg))">
+@msg.Content
+                    </div>
+                </div>
+            }
+            @if (_isStreaming)
+            {
+                <div class="chat-msg chat-msg-assistant">
+                    <div class="chat-msg-role">
+                        <span class="badge badge-ok">
+                            <span class="spinner"></span> Thinking...
+                        </span>
+                    </div>
+                    <div class="chat-msg-content chat-streaming" id="msg-streaming">
+@_streamingBuffer
+                    </div>
+                </div>
+            }
+            <div id="scroll-anchor" style="height:1px;position:absolute;bottom:0;width:1px;"></div>
+        </div>
+
+        <div class="chat-input-row">
+            <textarea @bind="_userInput" @bind:event="oninput"
+                      placeholder="Type a message and click Send"
+                      rows="2"
+                      class="chat-textarea" />
+            <button class="btn" @onclick="SendMessage" disabled="@(_isStreaming || string.IsNullOrWhiteSpace(_userInput))">
+                Send
+            </button>
+        </div>
+    }
+</div>
+
+@code {
+    private List<ModelProfile> _profiles = new();
+    private string? _selectedProfileId;
+    private readonly List<ChatEntry> _messages = new();
+    private string _userInput = "";
+    private bool _isStreaming;
+    private string _streamingBuffer = "";
+    private ElementReference _messagesDiv;
+    private bool _needsScroll;
+
+    protected override void OnInitialized()
+    {
+        _profiles = ModelProfileCatalog.All.OrderBy(p => (int)p.Tier).ToList();
+        if (_profiles.Count > 0)
+            _selectedProfileId = _profiles.First().Id;
+    }
+
+    async Task ScrollToBottom()
+    {
+        _needsScroll = true;
+        StateHasChanged();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (_needsScroll)
+        {
+            _needsScroll = false;
+            try
+            {
+                await JS.InvokeVoidAsync("palkiaScrollToBottom", "scroll-anchor");
+            }
+            catch
+            {
+                // Page may not be rendered yet.
+            }
+        }
+    }
+
+    private async Task SendMessage()
+    {
+        if (string.IsNullOrWhiteSpace(_userInput) || _isStreaming)
+            return;
+
+        var trimmed = _userInput.Trim();
+        _userInput = "";
+
+        _messages.Add(new ChatEntry { Role = "user", Content = trimmed, _profileId = "" });
+        await ScrollToBottom();
+
+        // Build history for the gateway call.
+        var history = new List<ChatMessage>(_messages.Count);
+        foreach (var m in _messages)
+        {
+            history.Add(new ChatMessage(m.Role, m.Content));
+        }
+
+        _isStreaming = true;
+        _streamingBuffer = "";
+        StateHasChanged();
+
+        var assistantEntry = new ChatEntry
+        {
+            Role = "assistant",
+            Content = "",
+            _profileId = _selectedProfileId ?? "unknown"
+        };
+        _messages.Add(assistantEntry);
+        await ScrollToBottom();
+
+        try
+        {
+            var reply = await ChatService.CompleteAsync(
+                (await AuthState.GetAuthenticationStateAsync()).User.Identity?.Name ?? "anonymous",
+                _selectedProfileId!,
+                history);
+
+            if (reply.Succeeded && !string.IsNullOrEmpty(reply.Reply))
+            {
+                _streamingBuffer = reply.Reply!;
+                assistantEntry.Content = reply.Reply;
+                assistantEntry._profileId = reply.ProfileId;
+            }
+            else
+            {
+                var errMsg = reply.Succeeded ? "(empty response)" : $"[Error {reply.Status}] {reply.Error}";
+                _streamingBuffer = errMsg;
+                assistantEntry.Content = errMsg;
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            assistantEntry.Content = "[Request cancelled]";
+        }
+        catch (Exception ex)
+        {
+            assistantEntry.Content = $"[Error] {ex.Message}";
+        }
+        finally
+        {
+            _isStreaming = false;
+            await ScrollToBottom();
+        }
+    }
+
+    // Kept for future keyboard shortcut support.
+    // To add Ctrl+Enter send, wire up via JS since KeyboardEventArgs
+    // does not carry JS-style preventDefault/stopPropagation.
+
+    public ValueTask DisposeAsync() => new();
+}

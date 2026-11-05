@@ -10,6 +10,7 @@ using Palkia.Infra.Ai;
 using Palkia.Infra.Metrics;
 using Palkia.Infra.Minecraft;
 using Palkia.Infra.OpenRc;
+using Palkia.Web.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -18,24 +19,19 @@ var builder = WebApplication.CreateBuilder(args);
 var connectionString = builder.Configuration.GetConnectionString("Default")
     ?? "Data Source=palkia.db";
 
-// Single options registration via AddDbContextFactory: it registers BOTH the
-// singleton DbContextOptions<PalkiaDbContext> (so the singleton
-// IDbContextFactory and DbAiKeyStore can consume them - a separate
-// AddDbContext call would register DbContextOptions as SCOPED, which crashes
-// DI validation with "Cannot consume scoped service DbContextOptions from
-// singleton IDbContextFactory") AND the scoped PalkiaDbContext itself that
-// Identity and migrations use.
-builder.Services.AddDbContextFactory<PalkiaDbContext>(o => o.UseSqlite(connectionString));
-// EF10's PendingModelChangesWarning throws during Migrate() because entity
-// CLR defaults (CreatedAtUtc = DateTimeOffset.UtcNow on ApplicationUser and
-// AiApiKeyRow) make the built model differ per-compile from the snapshot.
-// Those are runtime column VALUES, not schema changes, so downgrade the
-// warning to log-only instead of pretending there's a pending migration.
-builder.Services.AddDbContext<PalkiaDbContext>((sp, o) =>
+// Use AddDbContextFactory only — it registers singleton DbContextOptions
+// (safe for the singleton IDbContextFactory and DbAiKeyStore) and lets
+// request-scoped contexts be created via factory.Create(). A separate
+// AddDbContext would register scoped DbContextOptions, which conflicts
+// with EF Core's DI validation ("Cannot consume scoped DbContextOptions
+// from singleton IDbContextFactory"), AND later causes
+// "Cannot resolve scoped IDbContextOptionsConfiguration from root" at
+// runtime when EF Core composes options at line 192.
+builder.Services.AddDbContextFactory<PalkiaDbContext>(o =>
 {
     o.UseSqlite(connectionString);
     o.ConfigureWarnings(w => w.Ignore(Microsoft.EntityFrameworkCore.Diagnostics.RelationalEventId.PendingModelChangesWarning));
-}, ServiceLifetime.Scoped);
+});
 
 builder.Services.AddIdentity<ApplicationUser, IdentityRole>(options =>
     {
@@ -161,6 +157,20 @@ builder.Services.AddHostedService<AiServingHostedService>();
 // is mapped (item: initialized before accepting requests).
 builder.Services.AddSingleton<IAiKeyStore, DbAiKeyStore>();
 
+// Website chat client — talks to the same loopback gateway as external agents.
+// Registered as scoped so each Blazor circuit gets its own instance.
+// Uses a single shared HttpClient since it only calls internal endpoints.
+// The port defaults to 5000 (the default Kestrel port) or can be overridden
+// via the "Chat:BaseUrl" config key (e.g. "http://localhost:5000").
+var chatBaseUrl = builder.Configuration.GetValue("Chat:BaseUrl", "http://localhost:5000");
+
+builder.Services.AddScoped<IWebsiteChatService, WebsiteChatService>(sp =>
+{
+    var http = new HttpClient { BaseAddress = new Uri(chatBaseUrl) };
+    var config = sp.GetRequiredService<IConfiguration>();
+    return new WebsiteChatService(http, config);
+});
+
 // --- Web framework -----------------------------------------------------------
 
 builder.Services.AddRazorPages();
@@ -189,7 +199,8 @@ var app = builder.Build();
 // migrations on startup (and creates the DB from scratch on a fresh one).
 using (var scope = app.Services.CreateScope())
 {
-    var db = scope.ServiceProvider.GetRequiredService<PalkiaDbContext>();
+    var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<PalkiaDbContext>>();
+    var db = await dbFactory.CreateDbContextAsync();
 
     // Defense in depth: if the configured Data Source path's directory
     // doesn't exist (wrong environment picked up, fresh install, whatever),
