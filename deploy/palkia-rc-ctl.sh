@@ -17,10 +17,12 @@
 set -eu
 PATH=/sbin:/usr/sbin:/bin:/usr/bin
 
-# Keep this list in lockstep with Palkia.Core.Services.ManagedServiceCatalog.
+# Keep this list in lockstep with Palkia.Core.Services.ManagedServiceCatalog
+# AND the RcName of every profile in Palkia.Core.Ai.ModelProfileCatalog
+# (palkia-ft-<id>; these only exist as symlinks if you installed that profile).
 # Anything not listed here is refused, full stop - the app's own catalog is
 # not trusted as the source of truth for privilege, this file is.
-ALLOWED_SERVICES="samba nfs nfsclient"
+ALLOWED_SERVICES="samba nfs nfsclient minecraft palkia-ft-fast palkia-ft-small palkia-ft-medium palkia-ft-big palkia-ft-max"
 ALLOWED_ACTIONS="start stop restart status"
 
 usage() {

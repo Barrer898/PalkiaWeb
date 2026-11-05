@@ -1,0 +1,142 @@
+#!/sbin/openrc-run
+# /etc/init.d/palkia-ft   (installed ONCE; each profile is a symlink to it)
+#
+#   ln -s palkia-ft /etc/init.d/palkia-ft-medium     # also fast/small/big/max
+#
+# OpenRC runs a symlinked script under the link's name, so RC_SVCNAME is
+# "palkia-ft-medium" and /etc/conf.d/palkia-ft-medium is picked up
+# automatically. The profile id is whatever follows "palkia-ft-"; it is
+# checked against a hardcoded list in start_pre and again in the launcher.
+#
+# Runs one `ft serve` instance (FreeToken) under supervise-daemon as the
+# dedicated, unprivileged 'freetoken' user - separate from 'palkia' (the app
+# account) and from 'minecraft', same reasoning as deploy/minecraft.initd.
+#
+# NEVER add these to a runlevel. Palkia's resource broker decides when a
+# profile may start (it takes a lease first) and stops it when idle; a
+# profile started at boot would run outside the broker's accounting.
+#
+# The numbers that must agree by hand (none is derived from another):
+#   - the lease in Palkia.Core.Ai.ModelProfileCatalog
+#   - cpu.max / memory.max in /etc/conf.d/palkia-ft-<profile>
+#   - FT_* values in /etc/palkia/freetoken/palkia-ft-<profile>.conf
+# The broker only controls WHEN a server may start; the cgroup is what
+# actually caps it while running. See deploy/README.md section 10.
+
+profile="${RC_SVCNAME#palkia-ft-}"
+name="palkia-ft (${profile})"
+description="FreeToken model server, profile '${profile}' - started via Palkia's broker"
+
+: "${ft_user:=freetoken}"
+: "${ft_log_dir:=/var/log/palkia-ft}"
+: "${ft_home:=/var/lib/freetoken}"
+
+# Deliberately NOT overridable from conf.d: the launcher uses the same path.
+ft_conf_dir="/etc/palkia/freetoken"
+
+command="/usr/local/sbin/palkia-ft-launch"
+command_args="${profile}"
+command_user="${ft_user}:${ft_user}"
+command_background="yes"
+
+supervisor="supervise-daemon"
+pidfile="/run/${RC_SVCNAME}.pid"
+
+output_log="${ft_log_dir}/${profile}.log"
+error_log="${ft_log_dir}/${profile}.err"
+
+directory="${ft_home}"
+
+# A crash-looping 35B load hammers NVMe, RAM and swap for minutes each try.
+# Give up after 3 respawns in 30 minutes and let the broker/UI report Failed.
+respawn_delay=10
+respawn_max=3
+respawn_period=1800
+
+# Unloading a large model can take a while; don't SIGKILL mid-teardown.
+retry="SIGTERM/90/SIGKILL/30"
+
+depend() {
+	need localmount
+	# Loopback-only service: no "need net". Never "after palkia-web" either -
+	# the app is not a dependency of the model servers.
+}
+
+# Read one FT_* value out of the profile config in a subshell, so nothing
+# from the (root-owned, trusted) file leaks into this script's namespace.
+_ft_conf_value() {
+	( . "${ft_conf}" >/dev/null 2>&1 && eval "printf '%s' \"\${$1:-}\"" )
+}
+
+start_pre() {
+	case "${profile}" in
+		fast|small|medium|big|max) ;;
+		*)
+			eerror "'${profile}' is not a Palkia profile (fast/small/medium/big/max)."
+			eerror "Start one of the palkia-ft-<profile> symlinks, not palkia-ft itself."
+			return 1
+			;;
+	esac
+
+	ft_conf="${ft_conf_dir}/palkia-ft-${profile}.conf"
+
+	if [ ! -x "${command}" ]; then
+		eerror "${command} is missing or not executable - install"
+		eerror "deploy/palkia-ft-launch.sh there (root:root, 0755)."
+		return 1
+	fi
+
+	if [ ! -f "${ft_conf}" ]; then
+		eerror "${ft_conf} not found - install deploy/freetoken/profiles/${profile}.conf there."
+		return 1
+	fi
+
+	if [ ! -f "${ft_conf_dir}/keys.env" ]; then
+		eerror "${ft_conf_dir}/keys.env not found - see deploy/README.md section 10."
+		return 1
+	fi
+
+	ft_model="$(_ft_conf_value FT_MODEL)"
+	if [ -z "${ft_model}" ] || [ ! -d "${ft_model}" ]; then
+		eerror "FT_MODEL '${ft_model}' (from ${ft_conf}) is not a directory."
+		eerror "Download/convert the checkpoint there first (deploy/README.md section 10)."
+		return 1
+	fi
+
+	checkpath -d -m 0750 -o "${ft_user}:${ft_user}" "${ft_log_dir}"
+	checkpath -d -m 0750 -o "${ft_user}:${ft_user}" "${ft_home}"
+
+	if [ ! -e /dev/nvidiactl ]; then
+		eerror "/dev/nvidiactl is missing - NVIDIA driver not loaded?"
+		return 1
+	fi
+
+	# Deployment rules s7: inspect actual free VRAM / RAM BEFORE starting a
+	# model. Refusing here is a clean failure; letting ft try is how a box
+	# ends up swapping or the desktop session losing its VRAM.
+	ft_min_vram="$(_ft_conf_value FT_MIN_FREE_VRAM_MB)"
+	case "${ft_min_vram}" in ''|*[!0-9]*) ft_min_vram=0 ;; esac
+	if [ "${ft_min_vram}" -gt 0 ]; then
+		if command -v nvidia-smi >/dev/null 2>&1; then
+			ft_free_vram="$(nvidia-smi -i 0 --query-gpu=memory.free --format=csv,noheader,nounits 2>/dev/null | head -n 1 | tr -dc '0-9')"
+			if [ -n "${ft_free_vram}" ] && [ "${ft_free_vram}" -lt "${ft_min_vram}" ]; then
+				eerror "Only ${ft_free_vram} MiB VRAM free, ${profile} needs ${ft_min_vram} MiB."
+				eerror "Another profile (or a desktop session) is holding it - see nvidia-smi."
+				return 1
+			fi
+		else
+			ewarn "nvidia-smi not found - skipping the free-VRAM check."
+		fi
+	fi
+
+	ft_min_ram="$(_ft_conf_value FT_MIN_AVAILABLE_RAM_MB)"
+	case "${ft_min_ram}" in ''|*[!0-9]*) ft_min_ram=0 ;; esac
+	if [ "${ft_min_ram}" -gt 0 ]; then
+		ft_avail_kb="$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)"
+		if [ -n "${ft_avail_kb}" ] && [ $((ft_avail_kb / 1024)) -lt "${ft_min_ram}" ]; then
+			eerror "Only $((ft_avail_kb / 1024)) MiB RAM available, ${profile} needs ${ft_min_ram} MiB."
+			eerror "Stop Minecraft or another large service first."
+			return 1
+		fi
+	fi
+}

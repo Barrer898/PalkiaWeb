@@ -16,3 +16,23 @@ export AdminSeed__DisplayName=""
 
 # Binds to loopback only - put a reverse proxy (nginx) in front for LAN
 # access and TLS, rather than exposing Kestrel directly. See deploy/README.md.
+
+# FreeToken AI gateway: the loopback shared secrets the gateway sends to each
+# `ft serve` (must match /etc/palkia/freetoken/keys.env - deploy/README.md
+# section 10 generates both from one source). One line per installed profile:
+#export FreeToken__UpstreamApiKeys__fast=""
+#export FreeToken__UpstreamApiKeys__small=""
+#export FreeToken__UpstreamApiKeys__medium=""
+#export FreeToken__UpstreamApiKeys__big=""
+#export FreeToken__UpstreamApiKeys__max=""
+
+# The website chat page calls the gateway on the app's own listener. Must match
+# ASPNETCORE_URLS above (the code default is http://localhost:5000, which is
+# the dev port, not this one).
+export Chat__BaseUrl="http://127.0.0.1:5080"
+
+# Website chat credential - the same value must also be a FreeToken__ApiKeys__N
+# entry (see docs/AI-SETUP.md section 4). Generate with: openssl rand -hex 32
+#export FreeToken__WebsiteApiKey=""
+#export FreeToken__ApiKeys__0__Label="website"
+#export FreeToken__ApiKeys__0__Key=""

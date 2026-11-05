@@ -1,13 +1,16 @@
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
+using Palkia.Core.Ai;
 using Palkia.Core.Broker;
 using Palkia.Core.Metrics;
 using Palkia.Core.Minecraft;
 using Palkia.Core.Services;
 using Palkia.Data;
+using Palkia.Infra.Ai;
 using Palkia.Infra.Metrics;
 using Palkia.Infra.Minecraft;
 using Palkia.Infra.OpenRc;
+using Palkia.Web.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -16,8 +19,19 @@ var builder = WebApplication.CreateBuilder(args);
 var connectionString = builder.Configuration.GetConnectionString("Default")
     ?? "Data Source=palkia.db";
 
-builder.Services.AddDbContext<PalkiaDbContext>(options =>
-    options.UseSqlite(connectionString));
+// Use AddDbContextFactory only — it registers singleton DbContextOptions
+// (safe for the singleton IDbContextFactory and DbAiKeyStore) and lets
+// request-scoped contexts be created via factory.Create(). A separate
+// AddDbContext would register scoped DbContextOptions, which conflicts
+// with EF Core's DI validation ("Cannot consume scoped DbContextOptions
+// from singleton IDbContextFactory"), AND later causes
+// "Cannot resolve scoped IDbContextOptionsConfiguration from root" at
+// runtime when EF Core composes options at line 192.
+builder.Services.AddDbContextFactory<PalkiaDbContext>(o =>
+{
+    o.UseSqlite(connectionString);
+    o.ConfigureWarnings(w => w.Ignore(Microsoft.EntityFrameworkCore.Diagnostics.RelationalEventId.PendingModelChangesWarning));
+});
 
 builder.Services.AddIdentity<ApplicationUser, IdentityRole>(options =>
     {
@@ -99,6 +113,64 @@ builder.Services.AddSingleton<LinuxSystemMetricsSampler>();
 builder.Services.AddSingleton<ISystemMetricsProvider>(sp => sp.GetRequiredService<LinuxSystemMetricsSampler>());
 builder.Services.AddHostedService(sp => sp.GetRequiredService<LinuxSystemMetricsSampler>());
 
+// --- Infra: AI serving (FreeToken) -------------------------------------------
+// Five-profile lineup driven through the same broker as Minecraft: leases are
+// taken on per-TIER slot ids so "never two large models at once" and "Small +
+// Fast may coexist" fall out of the budget arithmetic instead of special
+// cases. The gateway (/api/llm/v1/*) is the ONLY path to ft - it binds to
+// loopback and Palkia adds the per-key auth/concurrency layer (§6/§8). The
+// network-level privacy boundary is Tailscale Serve, not nginx - see
+// deploy/TAILSCALE.md.
+
+var freeTokenOptions = new FreeTokenOptions
+{
+    ProfileConfigDir = builder.Configuration["FreeToken:ProfileConfigDir"] ?? "/etc/palkia/freetoken",
+    ModelsDir = builder.Configuration["FreeToken:ModelsDir"] ?? "/var/lib/palkia-models",
+    BindHost = builder.Configuration["FreeToken:BindHost"] ?? "127.0.0.1",
+    IdleShutdownMinutes = builder.Configuration.GetValue("FreeToken:IdleShutdownMinutes", 15),
+    LoadTimeoutSeconds = builder.Configuration.GetValue("FreeToken:LoadTimeoutSeconds", 900),
+    AlwaysOnProfiles = builder.Configuration.GetSection("FreeToken:AlwaysOnProfiles").Get<List<string>>() ?? new(),
+};
+// PR review item 1: these bind from Configuration, not Services - the old
+// builder.Services.GetSection(...) didn't even compile.
+builder.Configuration.GetSection("FreeToken:ApiKeys").Bind(freeTokenOptions.ApiKeys);
+builder.Configuration.GetSection("FreeToken:UpstreamApiKeys").Bind(freeTokenOptions.UpstreamApiKeys);
+builder.Services.AddSingleton(freeTokenOptions);
+
+// Item 2: FreeTokenClient's constructor takes an HttpClient, so it must be
+// registered through AddHttpClient (the typed-client overload injects a
+// pooled, properly-lifecycled client). Health/stats polls are loopback and
+// tiny; a short timeout keeps a wedged ft instance from hanging the poll
+// loop forever.
+builder.Services.AddHttpClient<IFreeTokenClient, FreeTokenClient>(client =>
+{
+    client.Timeout = TimeSpan.FromSeconds(10);
+});
+
+builder.Services.AddSingleton<AiServingManager>();
+builder.Services.AddSingleton<IAiServingManager>(sp => sp.GetRequiredService<AiServingManager>());
+builder.Services.AddHostedService<AiServingHostedService>();
+
+// Item 7: admin-managed API keys, hashed at rest in SQLite. Registered as a
+// singleton because ApiKeyAuthenticator reads its in-memory snapshot on the
+// request hot path; LoadAsync() below fills that snapshot BEFORE the gateway
+// is mapped (item: initialized before accepting requests).
+builder.Services.AddSingleton<IAiKeyStore, DbAiKeyStore>();
+
+// Website chat client — talks to the same loopback gateway as external agents.
+// Registered as scoped so each Blazor circuit gets its own instance.
+// Uses a single shared HttpClient since it only calls internal endpoints.
+// The port defaults to 5000 (the default Kestrel port) or can be overridden
+// via the "Chat:BaseUrl" config key (e.g. "http://localhost:5000").
+var chatBaseUrl = builder.Configuration.GetValue("Chat:BaseUrl", "http://localhost:5000");
+
+builder.Services.AddScoped<IWebsiteChatService, WebsiteChatService>(sp =>
+{
+    var http = new HttpClient { BaseAddress = new Uri(chatBaseUrl), Timeout = Timeout.InfiniteTimeSpan };
+    var config = sp.GetRequiredService<IConfiguration>();
+    return new WebsiteChatService(http, config);
+});
+
 // --- Web framework -----------------------------------------------------------
 
 builder.Services.AddRazorPages();
@@ -109,17 +181,26 @@ builder.Services.AddAuthorization(options =>
     options.AddPolicy("AdminOnly", policy => policy.RequireRole("Admin"));
 });
 
+// Item 4: Kestrel enforces the SAME body ceiling as the gateway, at the
+// connection level - a chunked upload that never declares Content-Length
+// gets aborted by the server itself once it crosses the limit, instead of
+// being buffered indefinitely before any handler ever sees it. This must run
+// on `builder` BEFORE builder.Build(); after Build() the service collection
+// is read-only and ConfigureKestrel throws.
+builder.WebHost.ConfigureKestrel(kestrel =>
+    kestrel.Limits.MaxRequestBodySize = AiGatewayEndpoints.MaxRequestBodyBytes);
+
 var app = builder.Build();
 
 // --- Dev-time DB bring-up + first-run admin seed ----------------------------
-// EnsureCreated() is a deliberate phase-1 shortcut so we don't need the
-// dotnet-ef CLI (not available in the sandbox this was scaffolded in).
-// Before phase 2 introduces schema changes, switch this to real EF Core
-// Migrations (`dotnet ef migrations add InitialCreate`) so upgrades don't
-// require dropping the database.
+// Item 8: real EF Core migrations, not EnsureCreated(). EnsureCreated never
+// upgrades an existing database, so the new AiApiKeys table would simply be
+// missing on every already-installed Palkia. Migrate() applies pending
+// migrations on startup (and creates the DB from scratch on a fresh one).
 using (var scope = app.Services.CreateScope())
 {
-    var db = scope.ServiceProvider.GetRequiredService<PalkiaDbContext>();
+    var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<PalkiaDbContext>>();
+    var db = await dbFactory.CreateDbContextAsync();
 
     // Defense in depth: if the configured Data Source path's directory
     // doesn't exist (wrong environment picked up, fresh install, whatever),
@@ -132,11 +213,17 @@ using (var scope = app.Services.CreateScope())
         Directory.CreateDirectory(dbDirectory);
     }
 
-    db.Database.EnsureCreated();
+    db.Database.Migrate();
 
     await SeedAdminAsync(scope.ServiceProvider, app.Configuration, app.Logger);
+
     await ReconcileBrokerAsync(scope.ServiceProvider, app.Logger);
 }
+
+// Item 1/7: fill the hashed-key auth snapshot BEFORE the gateway can accept
+// a single request - this runs after the migration block above (the table
+// must exist) and long before app.Run() below starts listening.
+await app.Services.GetRequiredService<IAiKeyStore>().LoadAsync();
 
 if (!app.Environment.IsDevelopment())
 {
@@ -149,6 +236,14 @@ app.UseRouting();
 
 app.UseAuthentication();
 app.UseAuthorization();
+
+// The LLM gateway is authenticated by its OWN API-key layer (per-agent
+// credentials, deployment rules §8), not by the Identity cookie - coding
+// agents don't do interactive logins. Reachability is bounded one level down
+// instead: Palkia listens on loopback/LAN only and Tailscale Serve is the
+// sole remote entry point (deploy/TAILSCALE.md). Map BEFORE the Blazor
+// fallback so /api/llm/* never falls through to _Host.
+app.MapAiGateway();
 
 app.MapRazorPages();
 app.MapBlazorHub();
@@ -163,24 +258,26 @@ static async Task ReconcileBrokerAsync(IServiceProvider services, ILogger logger
     var minecraftOptions = services.GetRequiredService<MinecraftOptions>();
 
     var minecraft = ManagedServiceCatalog.Find("minecraft");
-    if (minecraft is null)
+    if (minecraft is not null)
     {
-        return;
+        var status = await serviceControl.GetStatusAsync(minecraft);
+        if (status.State == ServiceRunState.Started)
+        {
+            var amount = new ResourceBudget(minecraftOptions.CpuCores, minecraftOptions.MemoryMb, 0);
+            broker.AdoptExistingLease(new LeaseRequest(minecraft.Id, minecraft.DisplayName, amount));
+
+            logger.LogInformation(
+                "Minecraft was already running at startup - adopted a {CpuCores}-core/{MemoryMb}MB lease " +
+                "for it so the broker's accounting matches reality.",
+                minecraftOptions.CpuCores, minecraftOptions.MemoryMb);
+        }
     }
 
-    var status = await serviceControl.GetStatusAsync(minecraft);
-    if (status.State != ServiceRunState.Started)
-    {
-        return;
-    }
-
-    var amount = new ResourceBudget(minecraftOptions.CpuCores, minecraftOptions.MemoryMb, 0);
-    broker.AdoptExistingLease(new LeaseRequest(minecraft.Id, minecraft.DisplayName, amount));
-
-    logger.LogInformation(
-        "Minecraft was already running at startup - adopted a {CpuCores}-core/{MemoryMb}MB lease " +
-        "for it so the broker's accounting matches reality.",
-        minecraftOptions.CpuCores, minecraftOptions.MemoryMb);
+    // ft servers that survived an app restart get re-adopted the same way -
+    // AiServingManager checks all five profiles against OpenRC and takes over
+    // their tier-slot leases. Idempotent: the hosted service runs it again on
+    // start and skips slots whose session already holds a live lease.
+    await services.GetRequiredService<AiServingManager>().ReconcileAtStartupAsync();
 }
 
 static async Task SeedAdminAsync(IServiceProvider services, IConfiguration config, ILogger logger)

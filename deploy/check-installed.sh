@@ -32,6 +32,32 @@ check "$REPO_DIR/palkia-minecraft-launch.sh" /usr/local/sbin/palkia-minecraft-la
 check "$REPO_DIR/palkia-minecraft.initd" /etc/init.d/minecraft
 check "$REPO_DIR/palkia-minecraft.confd" /etc/conf.d/minecraft
 
+# --- FreeToken AI profiles (README section 10) -------------------------------
+# The launcher and the shared init script are needed once; the rest is per
+# profile. A profile you chose not to install shows MISSING - that's fine as
+# long as it's not one you intend to start.
+echo
+echo "FreeToken:"
+check "$REPO_DIR/palkia-ft-launch.sh"    /usr/local/sbin/palkia-ft-launch
+check "$REPO_DIR/palkia-ft.initd"        /etc/init.d/palkia-ft
+
+for p in fast small medium big max; do
+    check "$REPO_DIR/freetoken/profiles/$p.conf" "/etc/palkia/freetoken/palkia-ft-$p.conf"
+    check "$REPO_DIR/freetoken/confd/$p.confd"   "/etc/conf.d/palkia-ft-$p"
+    if [ -L "/etc/init.d/palkia-ft-$p" ]; then
+        echo "OK:      /etc/init.d/palkia-ft-$p (symlink)"
+    else
+        echo "MISSING: /etc/init.d/palkia-ft-$p (ln -s palkia-ft /etc/init.d/palkia-ft-$p)"
+    fi
+done
+
+if [ -f /etc/palkia/freetoken/keys.env ]; then
+    echo "OK:      /etc/palkia/freetoken/keys.env (contents not compared)"
+else
+    echo "MISSING: /etc/palkia/freetoken/keys.env"
+fi
+
 echo
 echo "Note: conf.d files are expected to differ if you've edited them for this"
-echo "box (e.g. AdminSeed values, memory limits) - that's not a problem."
+echo "box (e.g. AdminSeed values, memory limits)
+echo "and so are the freetoken profile .conf files once you have tuned them" - that's not a problem."

@@ -1,0 +1,26 @@
+# /etc/conf.d/palkia-ft-small   (root:root, 0640)
+
+ft_user="freetoken"
+
+# Hard ceilings enforced by the kernel. Must agree with the 'small' lease in
+# Palkia.Core.Ai.ModelProfileCatalog (1 core(s) / 2048MB host RAM) - the
+# broker only decides WHEN this may start, the cgroup is what caps it.
+#
+# memory.max includes pinned expert banks and page cache for mmap'd weights.
+# If the .err log / dmesg shows the OOM killer on load, raise BOTH this and the
+# lease, don't just raise this. cpu.max below is 1 core(s): if
+# cpu.stat under /sys/fs/cgroup/*palkia-ft-small/ shows lots of throttling, raise both.
+rc_cgroup_settings="
+cpu.max 100000 100000
+memory.max 2048M
+"
+# Uncomment to make "this only works by paging to swap" fail fast with an
+# OOM kill instead of a slow thrash (deployment rules s7). Recommended while
+# evaluating the max profile.
+#rc_cgroup_settings="${rc_cgroup_settings}
+#memory.swap.max 0
+#"
+
+# Precaution for CUDA pinned host memory; harmless otherwise (still bounded
+# by memory.max). Drop it if you confirm pinning works without it.
+rc_ulimit="-l unlimited"

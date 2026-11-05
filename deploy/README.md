@@ -202,3 +202,91 @@ sh deploy/check-installed.sh      # OK / STALE / MISSING for each root-owned fil
 Run it after every pull that touches `deploy/`. `conf.d` files are expected to
 differ if you've edited them for this box; that's not a problem. For anything
 console-related, `deploy/diagnose-console.sh` goes further (see above).
+
+## 10. AI serving (FreeToken)
+
+Five profiles (`fast`, `small`, `medium`, `big`, `max` - see
+`Palkia_FreeToken_Deployment_Rules.md`), each its own OpenRC service
+`palkia-ft-<id>` running `ft serve` on a loopback port. Like Minecraft, they
+are **never added to a runlevel**: the app takes a broker lease, starts the
+profile, and stops it again when idle. Install only the profiles you intend
+to use; the rollout order in the rules doc is `medium` -> `small`/`fast` ->
+`big` -> `max`.
+
+**Prerequisites:** NVIDIA driver r580+ (CUDA 13), a CUDA 13 toolkit with
+`nvcc` (kernels are JIT-compiled on first start; the launcher puts
+`/opt/cuda/bin` on `PATH` - change it in `palkia-ft-launch.sh` if Gentoo put
+yours elsewhere), `uv`, CPython 3.12.
+
+### a. Service account, FreeToken, models
+
+```sh
+useradd -r -m -d /var/lib/freetoken -s /sbin/nologin -G video freetoken
+install -d -o freetoken -g freetoken -m 0750 /var/lib/palkia-models /opt/freetoken
+
+su -s /bin/sh freetoken -c 'cd /opt/freetoken && uv venv && uv pip install "freetoken[accel]"'
+/opt/freetoken/.venv/bin/ft --version        # record this (rules doc, section 10)
+```
+
+Put each checkpoint in the directory named by `FT_MODEL` in its profile conf
+(defaults: `/var/lib/palkia-models/<name>`), owned by `freetoken`. Check the
+three things the profile confs warn about before trusting a profile: the
+checkpoint is quantized small enough for 12GB, FreeToken supports that
+architecture + quantization, and the quant kernel actually works on an
+RTX 3060 (`ft serve --help` lists the backend flags).
+
+### b. Install the files
+
+```sh
+install -o root -g root -m 0755 deploy/palkia-rc-ctl.sh     /usr/local/sbin/palkia-rc-ctl   # allow-list changed - reinstall it
+install -o root -g root -m 0755 deploy/palkia-ft-launch.sh  /usr/local/sbin/palkia-ft-launch
+install -o root -g root -m 0755 deploy/palkia-ft.initd      /etc/init.d/palkia-ft
+install -d -o root -g freetoken -m 0750 /etc/palkia/freetoken /var/log/palkia-ft
+
+for p in medium; do        # add the profiles you want: fast small medium big max
+    ln -sf palkia-ft /etc/init.d/palkia-ft-$p
+    install -o root -g root -m 0644 deploy/freetoken/profiles/$p.conf /etc/palkia/freetoken/palkia-ft-$p.conf
+    install -o root -g root -m 0640 deploy/freetoken/confd/$p.confd   /etc/conf.d/palkia-ft-$p
+done
+```
+
+Do **not** `rc-update add` any of them.
+
+### c. Upstream keys (generated once, written to both places)
+
+`ft serve` requires its own key (defense in depth behind the loopback bind);
+the app's gateway injects it. The launcher refuses to start a profile whose
+key is empty. Generate all five at once so the two sides can't disagree:
+
+```sh
+umask 077
+for p in fast small medium big max; do
+    printf 'FT_UPSTREAM_KEY_%s=%s\n' "$(echo $p | tr a-z A-Z)" "$(openssl rand -hex 32)"
+done > /etc/palkia/freetoken/keys.env
+chown root:freetoken /etc/palkia/freetoken/keys.env && chmod 0640 /etc/palkia/freetoken/keys.env
+
+# the matching lines for /etc/conf.d/palkia-web (paste them in, then restart the app):
+sed -E 's/^FT_UPSTREAM_KEY_([A-Z]+)=(.*)$/export FreeToken__UpstreamApiKeys__\L\1="\2"/' /etc/palkia/freetoken/keys.env
+```
+
+### d. Smoke test one profile by hand, then hand it back to the broker
+
+```sh
+rc-service palkia-ft-medium start
+tail -f /var/log/palkia-ft/medium.log /var/log/palkia-ft/medium.err   # first start compiles kernels: minutes
+curl -s http://127.0.0.1:1921/health                                   # exempt from the key
+rc-service palkia-ft-medium stop
+```
+
+`start_pre` refuses to start when the free VRAM / available RAM in the
+profile conf isn't there (rules doc, section 7), and says why. While testing,
+watch `nvidia-smi`, `free -m`, swap-in/out (`vmstat 1`) and
+`cpu.stat` under `/sys/fs/cgroup/*palkia-ft-<id>/` (the exact directory name depends on your OpenRC version). The cgroup limits in the confd file
+must agree with the lease in `ModelProfileCatalog` - if a profile is
+OOM-killed on load or CPU-throttled, raise **both**, not just the cgroup.
+Uncomment the `memory.swap.max 0` block in the `max` confd while evaluating
+it, so "only works by paging to swap" fails fast instead of thrashing.
+
+### e. Public access
+
+See `deploy/TAILSCALE.md` (Tailscale Serve, tailnet only).

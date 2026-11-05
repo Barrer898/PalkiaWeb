@@ -1,0 +1,408 @@
+@page "/chat"
+@attribute [Authorize]
+@implements IDisposable
+@inject IWebsiteChatService ChatService
+@inject IAiServingManager Serving
+@inject IJSRuntime JS
+@inject AuthenticationStateProvider AuthState
+
+<h1>AI Chat</h1>
+
+<p class="muted">
+    Local models running on this server. Each one loads on demand and shares
+    the CPU, RAM and VRAM budget with Minecraft and the other services - see
+    the <a href="/">dashboard</a> - so the first message to a stopped model
+    waits while it starts (a minute or two for the small ones, longer for the
+    big ones). Idle models shut down on their own.
+</p>
+
+@if (_profiles.Count == 0)
+{
+    <p class="muted">
+        No model profiles are available yet. Chat becomes available once the
+        AI gateway is set up.
+    </p>
+}
+else
+{
+    <div class="chat-container">
+        <table class="status-table chat-profiles">
+            <thead>
+                <tr>
+                    <th>Model</th>
+                    <th>State</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var p in _profiles)
+                {
+                    var st = Serving.GetState(p);
+                    var selected = p.Id == _selectedId;
+                    <tr class="@(selected ? "row-selected" : null)">
+                        <td>
+                            <strong>@p.DisplayName</strong>
+                            <div class="muted">@p.ContextTokens.ToString("N0")-token context</div>
+                            @if (!string.IsNullOrWhiteSpace(p.Description))
+                            {
+                                <div class="muted">@p.Description</div>
+                            }
+                        </td>
+                        <td>
+                            <span class="badge badge-@StateCss(st.State)">@StateLabel(st)</span>
+                            @if (st.State is ProfileRunState.Loading or ProfileRunState.Failed
+                                 && !string.IsNullOrWhiteSpace(st.HealthDetail))
+                            {
+                                <div class="muted">@st.HealthDetail</div>
+                            }
+                        </td>
+                        <td>
+                            <button class="btn" disabled="@selected" @onclick="() => Select(p)">
+                                @(selected ? "Selected" : "Use")
+                            </button>
+                            @if (st.State is ProfileRunState.Stopped or ProfileRunState.Failed)
+                            {
+                                <button class="btn btn-secondary" disabled="@_busy" @onclick="() => WarmUpAsync(p)">Warm up</button>
+                            }
+                            else
+                            {
+                                <AuthorizeView Policy="AdminOnly" Context="authCtx">
+                                    <Authorized>
+                                        <button class="btn btn-secondary" disabled="@_busy" @onclick="() => StopAsync(p)">Stop</button>
+                                    </Authorized>
+                                </AuthorizeView>
+                            }
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+
+        @if (!string.IsNullOrWhiteSpace(_message))
+        {
+            <pre class="output-box">@_message</pre>
+        }
+
+        <div id="chat-messages" class="chat-messages">
+            @if (_messages.Count == 0)
+            {
+                <p class="muted">Pick a model above and say something.</p>
+            }
+            @foreach (var msg in _messages)
+            {
+                <div class="chat-msg chat-msg-@(msg.Role)">
+                    <div class="chat-msg-role">
+                        @if (msg.Role == "user")
+                        {
+                            <span class="badge badge-neutral">You</span>
+                        }
+                        else
+                        {
+                            <span class="badge badge-ok">@ProfileName(msg.ProfileId)</span>
+                        }
+                        @if (msg.Elapsed is { } elapsed)
+                        {
+                            <span class="muted">@(elapsed.TotalSeconds.ToString("0.0"))s</span>
+                        }
+                    </div>
+                    @if (msg.Pending)
+                    {
+                        <div class="chat-msg-content chat-msg-pending"><span class="spinner"></span>@PendingText(msg)</div>
+                    }
+                    else
+                    {
+                        <div class="chat-msg-content">@msg.Content</div>
+                    }
+                </div>
+            }
+        </div>
+
+        @if (!string.IsNullOrWhiteSpace(_error))
+        {
+            <p class="error">@_error</p>
+        }
+
+        <div class="chat-input-row">
+            <textarea @bind="_input" @bind:event="oninput" @onkeydown="OnKeyDown"
+                      placeholder="Message the selected model (Ctrl+Enter to send)"
+                      rows="3"
+                      class="chat-textarea"
+                      disabled="@_sending"></textarea>
+            <div class="chat-actions">
+                @if (_sending)
+                {
+                    <button class="btn btn-secondary" @onclick="Cancel">Cancel</button>
+                }
+                else
+                {
+                    <button class="btn" disabled="@(string.IsNullOrWhiteSpace(_input) || _selectedId is null)" @onclick="SendAsync">Send</button>
+                }
+                <button class="btn btn-secondary" disabled="@(_sending || _messages.Count == 0)" @onclick="Clear">Clear</button>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    private List<ModelProfile> _profiles = new();
+    private string? _selectedId;
+    private readonly List<ChatEntry> _messages = new();
+
+    private string _input = "";
+    private string _userName = "anonymous";
+    private string? _message;   // warm up / stop results (output-box, like the Minecraft page)
+    private string? _error;     // failed chat request (red line under the transcript)
+    private bool _sending;
+    private bool _busy;
+    private bool _scrollPending;
+    private CancellationTokenSource? _cts;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _profiles = Serving.Profiles.OrderBy(p => (int)p.Tier).ToList();
+
+        // Default to something that answers right away; otherwise the everyday
+        // Medium profile - never silently the experimental Max one that sorts first.
+        _selectedId = (_profiles.FirstOrDefault(p => Serving.GetState(p).State == ProfileRunState.Ready)
+                       ?? _profiles.FirstOrDefault(p => p.Tier == ModelTier.Medium)
+                       ?? _profiles.FirstOrDefault())?.Id;
+
+        var auth = await AuthState.GetAuthenticationStateAsync();
+        _userName = auth.User.Identity?.Name ?? "anonymous";
+
+        // Fires from the serving manager on arbitrary threads whenever any
+        // profile starts, loads, queues, fails or stops.
+        Serving.StateChanged += OnServingChanged;
+    }
+
+    private void OnServingChanged() => _ = InvokeAsync(StateHasChanged);
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!_scrollPending)
+        {
+            return;
+        }
+
+        _scrollPending = false;
+        try
+        {
+            await JS.InvokeVoidAsync("palkiaScrollToBottom", "chat-messages");
+        }
+        catch (JSDisconnectedException)
+        {
+            // Circuit went away mid-render; nothing to scroll.
+        }
+    }
+
+    private void Select(ModelProfile profile) => _selectedId = profile.Id;
+
+    private async Task WarmUpAsync(ModelProfile profile)
+    {
+        _busy = true;
+        _message = null;
+        StateHasChanged();
+
+        try
+        {
+            var lease = await Serving.StartProfileAsync(profile);
+            _message = lease.Message;
+        }
+        catch (Exception ex)
+        {
+            _message = ex.Message;
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private async Task StopAsync(ModelProfile profile)
+    {
+        _busy = true;
+        _message = null;
+        StateHasChanged();
+
+        try
+        {
+            await Serving.StopProfileAsync(profile);
+            _message = $"Stopped {profile.DisplayName}.";
+        }
+        catch (Exception ex)
+        {
+            _message = ex.Message;
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private async Task OnKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter" && (e.CtrlKey || e.MetaKey))
+        {
+            await SendAsync();
+        }
+    }
+
+    private async Task SendAsync()
+    {
+        var text = _input.Trim();
+        var profile = _profiles.FirstOrDefault(p => p.Id == _selectedId);
+        if (text.Length == 0 || _sending || profile is null)
+        {
+            return;
+        }
+
+        _input = "";
+        _error = null;
+        _message = null;
+
+        var userEntry = new ChatEntry { Role = "user", Content = text };
+        _messages.Add(userEntry);
+
+        // History is built BEFORE the pending bubble exists, from finished
+        // turns only (failed attempts are removed below, never kept).
+        var history = _messages
+            .Where(m => !m.Pending)
+            .Select(m => new ChatMessage(m.Role, m.Content))
+            .ToList();
+
+        var pending = new ChatEntry { Role = "assistant", ProfileId = profile.Id, Pending = true };
+        _messages.Add(pending);
+
+        _sending = true;
+        _scrollPending = true;
+        _cts = new CancellationTokenSource();
+        var ct = _cts.Token;
+        StateHasChanged();
+
+        try
+        {
+            var reply = await ChatService.CompleteAsync(_userName, profile.Id, history, ct);
+
+            if (reply.Succeeded && !string.IsNullOrEmpty(reply.Reply))
+            {
+                pending.Content = reply.Reply!;
+                pending.Elapsed = reply.Elapsed;
+                pending.Pending = false;
+            }
+            else
+            {
+                var cancelled = reply.Status == 499;
+                Abandon(userEntry, pending, text, cancelled ? null : DescribeFailure(reply));
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            Abandon(userEntry, pending, text, null);
+        }
+        catch (Exception ex)
+        {
+            Abandon(userEntry, pending, text, ex.Message);
+        }
+        finally
+        {
+            _sending = false;
+            _scrollPending = true;
+            _cts?.Dispose();
+            _cts = null;
+        }
+    }
+
+    // A failed or cancelled request leaves no trace in the transcript (so the
+    // next request replays a clean history) and puts the text back in the box.
+    private void Abandon(ChatEntry userEntry, ChatEntry pending, string text, string? error)
+    {
+        _messages.Remove(pending);
+        _messages.Remove(userEntry);
+        if (string.IsNullOrEmpty(_input))
+        {
+            _input = text;
+        }
+        _error = error;
+    }
+
+    private void Cancel() => _cts?.Cancel();
+
+    private void Clear()
+    {
+        _messages.Clear();
+        _error = null;
+    }
+
+    private static string DescribeFailure(ChatReply reply)
+    {
+        var friendly = reply.Status switch
+        {
+            401 or 403 => "The chat has no valid gateway key yet - an admin needs to finish the AI setup (docs/AI-SETUP.md).",
+            429 => "This model is already busy with another request. Try again in a moment.",
+            503 => "The model is still loading. Try again in a minute.",
+            502 or 504 => "Couldn't get an answer from the model server.",
+            _ => "The request failed.",
+        };
+
+        return string.IsNullOrWhiteSpace(reply.Error)
+            ? $"{friendly} (HTTP {reply.Status})"
+            : $"{friendly} (HTTP {reply.Status}: {reply.Error})";
+    }
+
+    private string PendingText(ChatEntry entry)
+    {
+        var profile = _profiles.FirstOrDefault(p => p.Id == entry.ProfileId);
+        if (profile is null)
+        {
+            return "Waiting for the model...";
+        }
+
+        var st = Serving.GetState(profile);
+        return st.State switch
+        {
+            ProfileRunState.Ready => "Generating...",
+            ProfileRunState.Loading => "Loading the model into memory...",
+            ProfileRunState.Starting when st.QueuePosition > 0 =>
+                $"Queued until there is enough free CPU/RAM (position {st.QueuePosition})...",
+            ProfileRunState.Starting => "Starting the model...",
+            _ => "Waiting for the model...",
+        };
+    }
+
+    private string ProfileName(string profileId) =>
+        _profiles.FirstOrDefault(p => p.Id == profileId)?.DisplayName ?? profileId;
+
+    private static string StateCss(ProfileRunState state) => state switch
+    {
+        ProfileRunState.Ready => "ok",
+        ProfileRunState.Loading or ProfileRunState.Starting => "warn",
+        ProfileRunState.Failed => "danger",
+        _ => "neutral",
+    };
+
+    private static string StateLabel(ProfileRuntimeState st) => st.State switch
+    {
+        ProfileRunState.Ready => "Ready",
+        ProfileRunState.Loading => "Loading",
+        ProfileRunState.Starting when st.QueuePosition > 0 => $"Queued ({st.QueuePosition})",
+        ProfileRunState.Starting => "Starting",
+        ProfileRunState.Failed => "Failed",
+        _ => "Stopped",
+    };
+
+    public void Dispose()
+    {
+        Serving.StateChanged -= OnServingChanged;
+
+        // The circuit is going away (tab closed, sign-out, idle logout): drop
+        // any in-flight request so it doesn't hold a concurrency permit or a
+        // broker queue position for a reader that no longer exists.
+        try
+        {
+            _cts?.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+    }
+}
