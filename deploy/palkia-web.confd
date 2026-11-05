@@ -1,0 +1,27 @@
+# /etc/conf.d/palkia-web
+
+palkia_dir="/opt/palkia"
+palkia_user="palkia"
+palkia_dll="Palkia.Web.dll"
+
+# Passed through to the ASP.NET Core process. Prefer overriding config via
+# env vars here rather than editing appsettings.json in /opt/palkia, so a
+# redeploy (which overwrites the publish output) never clobbers secrets.
+export ASPNETCORE_ENVIRONMENT="Production"
+export ASPNETCORE_URLS="http://127.0.0.1:5080"
+export ConnectionStrings__Default="Data Source=/var/lib/palkia/palkia.db"
+export AdminSeed__Username=""
+export AdminSeed__Password=""
+export AdminSeed__DisplayName=""
+
+# Binds to loopback only - put a reverse proxy (nginx) in front for LAN
+# access and TLS, rather than exposing Kestrel directly. See deploy/README.md.
+
+# FreeToken AI gateway: the loopback shared secrets the gateway sends to each
+# `ft serve` (must match /etc/palkia/freetoken/keys.env - deploy/README.md
+# section 10 generates both from one source). One line per installed profile:
+#export FreeToken__UpstreamApiKeys__fast=""
+#export FreeToken__UpstreamApiKeys__small=""
+#export FreeToken__UpstreamApiKeys__medium=""
+#export FreeToken__UpstreamApiKeys__big=""
+#export FreeToken__UpstreamApiKeys__max=""

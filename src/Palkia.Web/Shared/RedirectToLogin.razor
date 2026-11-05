@@ -1,0 +1,13 @@
+@inject NavigationManager Navigation
+
+@code {
+    protected override void OnInitialized()
+    {
+        // A hard redirect (forceLoad) is required here, not client-side
+        // Blazor navigation: the login page is a plain Razor Page served
+        // over a normal HTTP request (so the auth cookie gets set before
+        // any SignalR circuit exists), not a routable Blazor component.
+        var returnUrl = Uri.EscapeDataString(new Uri(Navigation.Uri).PathAndQuery);
+        Navigation.NavigateTo($"/Account/Login?returnUrl={returnUrl}", forceLoad: true);
+    }
+}
