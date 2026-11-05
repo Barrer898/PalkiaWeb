@@ -25,3 +25,14 @@ export AdminSeed__DisplayName=""
 #export FreeToken__UpstreamApiKeys__medium=""
 #export FreeToken__UpstreamApiKeys__big=""
 #export FreeToken__UpstreamApiKeys__max=""
+
+# The website chat page calls the gateway on the app's own listener. Must match
+# ASPNETCORE_URLS above (the code default is http://localhost:5000, which is
+# the dev port, not this one).
+export Chat__BaseUrl="http://127.0.0.1:5080"
+
+# Website chat credential - the same value must also be a FreeToken__ApiKeys__N
+# entry (see docs/AI-SETUP.md section 4). Generate with: openssl rand -hex 32
+#export FreeToken__WebsiteApiKey=""
+#export FreeToken__ApiKeys__0__Label="website"
+#export FreeToken__ApiKeys__0__Key=""

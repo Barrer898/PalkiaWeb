@@ -166,7 +166,7 @@ var chatBaseUrl = builder.Configuration.GetValue("Chat:BaseUrl", "http://localho
 
 builder.Services.AddScoped<IWebsiteChatService, WebsiteChatService>(sp =>
 {
-    var http = new HttpClient { BaseAddress = new Uri(chatBaseUrl) };
+    var http = new HttpClient { BaseAddress = new Uri(chatBaseUrl), Timeout = Timeout.InfiniteTimeSpan };
     var config = sp.GetRequiredService<IConfiguration>();
     return new WebsiteChatService(http, config);
 });

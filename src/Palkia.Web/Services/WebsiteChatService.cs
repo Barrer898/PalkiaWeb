@@ -1,4 +1,6 @@
+using System.Diagnostics;
 using System.Net.Http.Headers;
+using System.Text;
 using System.Text.Json;
 using Palkia.Core.Ai;
 
@@ -6,12 +8,17 @@ namespace Palkia.Web.Services;
 
 /// <summary>
 /// Server-side chat client that talks to the same AI gateway as external agents.
-/// The caller's identity is the ASP.NET Identity cookie — no separate API key
-/// is needed for website users, so this uses a "website" key configured in
-/// FreeToken:ApiKeys for the website API key.
+/// The website authenticates to the gateway with its own key
+/// (FreeToken:WebsiteApiKey), which must ALSO be listed in FreeToken:ApiKeys
+/// (or the key store) or the gateway will reject it - see docs/AI-SETUP.md.
 /// </summary>
-public class WebsiteChatService : IWebsiteChatService
+public sealed class WebsiteChatService : IWebsiteChatService, IDisposable
 {
+    // The gateway itself will wait up to 15 minutes for a cold model, and a big
+    // model can then take a while to answer. HttpClient.Timeout is infinite
+    // (see Program.cs) so THIS is the real cap on one request.
+    private static readonly TimeSpan RequestTimeout = TimeSpan.FromMinutes(25);
+
     private readonly HttpClient _http;
     private readonly IConfiguration _config;
 
@@ -27,103 +34,171 @@ public class WebsiteChatService : IWebsiteChatService
         IReadOnlyList<ChatMessage> history,
         CancellationToken ct = default)
     {
-        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var sw = Stopwatch.StartNew();
+        var apiKey = _config["FreeToken:WebsiteApiKey"];
 
-        // Look up a configured website API key so the gateway treats the
-        // request as authenticated and tracks it against the caller label.
-        string? apiKey = _config["FreeToken:WebsiteApiKey"]
-            ?? _config["FreeToken:ApiKeys:website"]
-            ?? _config["FreeToken:ApiKeys:chat"];
-
-        var request = new
+        // OpenAI wire format: lowercase "role"/"content". (Serializing the
+        // ChatMessage record's own property names would send "Role"/"Content",
+        // which an OpenAI-style server rejects.)
+        var payload = new
         {
             model = profileId,
-            messages = history.Select(m => new { m.Role, m.Content }).ToArray(),
+            messages = history.Select(m => new { role = m.Role, content = m.Content }).ToArray(),
             stream = true,
             max_tokens = 4096,
         };
 
-        var body = new System.Net.Http.StringContent(
-            JsonSerializer.Serialize(request));
-        body.Headers.ContentType = new MediaTypeHeaderValue("application/json")
-        {
-            CharSet = "utf-8",
-        };
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(RequestTimeout);
 
-        // Attach the website API key as a Bearer token so the gateway
-        // treats the request as authenticated.
+        // Per-request message, so the auth header never lands on shared
+        // client state.
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/llm/v1/chat/completions")
+        {
+            Content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json"),
+        };
         if (!string.IsNullOrEmpty(apiKey))
         {
-            _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
         }
 
         try
         {
-            using var response = await _http.PostAsync(
-                "/api/llm/v1/chat/completions", body, ct);
+            // ResponseHeadersRead: return as soon as headers arrive instead of
+            // buffering the whole (streamed) body first.
+            using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cts.Token);
 
-            // If the gateway returns a non-streaming error (e.g. 401, 429, 502),
-            // read the body and return it as an error.
             if (!response.IsSuccessStatusCode)
             {
-                var errBody = await response.Content.ReadAsStringAsync(ct);
-                string errMsg;
-                try
-                {
-                    var errJson = JsonDocument.Parse(errBody);
-                    errMsg = errJson.RootElement
-                        .GetProperty("error")
-                        .GetProperty("message")
-                        .GetString() ?? errBody;
-                }
-                catch
-                {
-                    errMsg = errBody;
-                }
-                return ChatReply.Fail(errMsg, (int)response.StatusCode, profileId, sw.Elapsed);
+                var errBody = await response.Content.ReadAsStringAsync(cts.Token);
+                return ChatReply.Fail(ExtractErrorMessage(errBody), (int)response.StatusCode, profileId, sw.Elapsed);
             }
 
-            // Stream the SSE response to collect the final reply.
-            using var stream = await response.Content.ReadAsStreamAsync(ct);
+            var isSse = string.Equals(
+                response.Content.Headers.ContentType?.MediaType, "text/event-stream",
+                StringComparison.OrdinalIgnoreCase);
+
+            if (!isSse)
+            {
+                // Server ignored stream=true and sent one JSON document.
+                var json = await response.Content.ReadAsStringAsync(cts.Token);
+                return ChatReply.Ok(ExtractMessageContent(json), profileId, sw.Elapsed);
+            }
+
+            using var stream = await response.Content.ReadAsStreamAsync(cts.Token);
             using var reader = new StreamReader(stream);
 
-            var replyBuilder = new System.Text.StringBuilder();
-            string? line;
-            while ((line = await reader.ReadLineAsync()) != null && !ct.IsCancellationRequested)
+            var reply = new StringBuilder();
+            while (await reader.ReadLineAsync(cts.Token) is { } line)
             {
-                if (!line.StartsWith("data: ", StringComparison.Ordinal))
+                if (!line.StartsWith("data:", StringComparison.Ordinal))
+                {
                     continue;
-
-                var data = line.Substring(6);
-                if (data.Contains("\"finish_reason\""))
-                    continue; // done — no content in the final chunk
-
-                try
-                {
-                    using var chunk = JsonDocument.Parse(data);
-                    var delta = chunk.RootElement
-                        .GetProperty("choices")[0]
-                        .GetProperty("delta")
-                        .GetProperty("content")
-                        .GetString();
-                    if (!string.IsNullOrEmpty(delta))
-                        replyBuilder.Append(delta);
                 }
-                catch
+
+                var data = line.Substring(5).Trim();
+                if (data.Length == 0)
                 {
-                    // Ignore malformed SSE chunks.
+                    continue;
+                }
+
+                if (data == "[DONE]")
+                {
+                    break;
+                }
+
+                // Every chunk is parsed, including ones that carry
+                // "finish_reason": null - OpenAI-style servers put that field
+                // on every chunk, so its presence says nothing about the end.
+                var piece = ExtractDeltaContent(data);
+                if (!string.IsNullOrEmpty(piece))
+                {
+                    reply.Append(piece);
                 }
             }
 
-            return ChatReply.Ok(replyBuilder.ToString(), profileId, sw.Elapsed);
+            return ChatReply.Ok(reply.ToString(), profileId, sw.Elapsed);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            return ChatReply.Fail("Request cancelled.", 499, profileId, sw.Elapsed);
         }
         catch (OperationCanceledException)
         {
-            return ChatReply.Fail("Request cancelled.", 499, profileId, sw.Elapsed);
+            return ChatReply.Fail("Timed out waiting for the model.", 504, profileId, sw.Elapsed);
         }
         catch (HttpRequestException ex)
         {
             return ChatReply.Fail(ex.Message, 502, profileId, sw.Elapsed);
         }
     }
+
+    private static string ExtractErrorMessage(string body)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(body);
+            if (doc.RootElement.TryGetProperty("error", out var error)
+                && error.ValueKind == JsonValueKind.Object
+                && error.TryGetProperty("message", out var message)
+                && message.ValueKind == JsonValueKind.String)
+            {
+                return message.GetString() ?? body;
+            }
+        }
+        catch (JsonException)
+        {
+        }
+
+        return body;
+    }
+
+    private static string? ExtractDeltaContent(string data)
+    {
+        try
+        {
+            using var chunk = JsonDocument.Parse(data);
+            if (chunk.RootElement.TryGetProperty("choices", out var choices)
+                && choices.ValueKind == JsonValueKind.Array
+                && choices.GetArrayLength() > 0
+                && choices[0].TryGetProperty("delta", out var delta)
+                && delta.TryGetProperty("content", out var content)
+                && content.ValueKind == JsonValueKind.String)
+            {
+                return content.GetString();
+            }
+        }
+        catch (JsonException)
+        {
+            // Ignore a malformed chunk rather than losing the whole reply.
+        }
+
+        return null;
+    }
+
+    private static string ExtractMessageContent(string json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.TryGetProperty("choices", out var choices)
+                && choices.ValueKind == JsonValueKind.Array
+                && choices.GetArrayLength() > 0
+                && choices[0].TryGetProperty("message", out var message)
+                && message.TryGetProperty("content", out var content)
+                && content.ValueKind == JsonValueKind.String)
+            {
+                return content.GetString() ?? "";
+            }
+        }
+        catch (JsonException)
+        {
+        }
+
+        return "";
+    }
+
+    // The HttpClient is created per instance in Program.cs and owned here;
+    // without this every Blazor circuit leaked one.
+    public void Dispose() => _http.Dispose();
 }

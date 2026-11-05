@@ -223,7 +223,7 @@ a { color: var(--accent); }
 /* --- Chat page ---------------------------------------------------------------- */
 
 .chat-container {
-    max-width: 800px;
+    max-width: 900px;
 }
 
 .chat-header-row {
@@ -255,6 +255,7 @@ a { color: var(--accent); }
     border-radius: 6px;
     padding: 0.75rem;
     height: 520px;
+    max-height: 60vh;
     overflow-y: auto;
     margin-bottom: 0.75rem;
     display: flex;
@@ -277,6 +278,9 @@ a { color: var(--accent); }
 }
 
 .chat-msg-role {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
     font-size: 0.7rem;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -358,3 +362,28 @@ a { color: var(--accent); }
 @keyframes spin {
     to { transform: rotate(360deg); }
 }
+
+/* --- Chat page additions: model table, pending bubble, secondary buttons ------- */
+
+.btn-secondary {
+    background: transparent;
+    color: var(--text);
+    border: 1px solid var(--border);
+}
+
+.btn-secondary:hover:not(:disabled) { background: rgba(255, 255, 255, 0.08); }
+
+.chat-profiles { margin-bottom: 1rem; }
+.chat-profiles tr.row-selected td { background: rgba(79, 140, 255, 0.08); }
+
+.chat-msg-pending { color: var(--muted); }
+
+.chat-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+
+.chat-actions .btn { margin-right: 0; }
+
+.chat-textarea:disabled { opacity: 0.6; }

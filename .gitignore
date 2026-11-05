@@ -18,3 +18,8 @@ packages/
 *.env.*
 .DS_Store
 Thumbs.db
+
+# Local SQLite databases (the dev DB holds the seeded admin account)
+*.db
+*.db-shm
+*.db-wal
