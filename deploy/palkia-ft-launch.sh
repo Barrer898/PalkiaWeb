@@ -123,7 +123,8 @@ set -- "${FT_BIN}" serve \
     --max-prefill-length "${FT_PREFILL}" \
     --max-output-tokens "${FT_MAX_OUTPUT}" \
     --max-running-requests "${FT_MAX_RUNNING}" \
-    --memory-ratio "${FT_MEMORY_RATIO}"
+    --memory-ratio "${FT_MEMORY_RATIO}" \
+    --attention-backend triton
 
 [ -n "${FT_MOE_STRATEGY}" ] && set -- "$@" --moe-strategy "${FT_MOE_STRATEGY}"
 [ "${FT_TEXT_ONLY}" = "1" ] && set -- "$@" --text-model-only
