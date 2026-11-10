@@ -113,7 +113,7 @@ export HOME PATH HF_HUB_OFFLINE
 # --host is NOT configurable: loopback only (deployment rules s8). The
 # authenticated gateway in Palkia is the only thing that talks to this.
 set -- "${FT_BIN}" serve \
-    --model "${FT_MODEL}" \
+    --model-path "${FT_MODEL}" \
     --served-model-name "${FT_SERVED_NAME}" \
     --host 127.0.0.1 \
     --port "${FT_PORT}" \
