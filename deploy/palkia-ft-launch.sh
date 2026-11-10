@@ -108,7 +108,8 @@ unset key FT_UPSTREAM_KEY_FAST FT_UPSTREAM_KEY_SMALL FT_UPSTREAM_KEY_MEDIUM FT_U
 HOME="/var/lib/freetoken"
 PATH="/opt/cuda/bin:/usr/local/bin:/usr/bin:/bin"
 HF_HUB_OFFLINE=1
-export HOME PATH HF_HUB_OFFLINE
+CUDA_HOME=/opt/cuda
+export HOME PATH HF_HUB_OFFLINE CUDA_HOME
 
 # --host is NOT configurable: loopback only (deployment rules s8). The
 # authenticated gateway in Palkia is the only thing that talks to this.
